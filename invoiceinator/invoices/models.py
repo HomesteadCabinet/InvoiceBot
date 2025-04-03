@@ -31,6 +31,7 @@ LOCATION_TYPE_CHOICES = [
     ('header', 'Header'),
 ]
 
+
 class DataRule(models.Model):
     vendor = models.ForeignKey('Vendor', on_delete=models.CASCADE, related_name='data_rules')
     field_name = models.CharField(max_length=255, help_text="Name of the field to extract")
@@ -45,9 +46,9 @@ class DataRule(models.Model):
 
     # Validation rules
     required = models.BooleanField(default=True)
-    validation_regex = models.CharField(max_length=255, null=True, blank=True, help_text="Regex pattern for validation")
-    min_value = models.FloatField(null=True, blank=True, validators=[MinValueValidator(0)])
-    max_value = models.FloatField(null=True, blank=True, validators=[MinValueValidator(0)])
+    # validation_regex = models.CharField(max_length=255, null=True, blank=True, help_text="Regex pattern for validation")
+    # min_value = models.FloatField(null=True, blank=True, validators=[MinValueValidator(0)])
+    # max_value = models.FloatField(null=True, blank=True, validators=[MinValueValidator(0)])
 
     # Processing rules
     pre_processing = models.JSONField(null=True, blank=True, help_text="Pre-processing steps: {'remove_spaces': bool, 'to_uppercase': bool, etc.}")

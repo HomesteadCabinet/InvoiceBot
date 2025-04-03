@@ -16,6 +16,8 @@ const vendorName = ref('')
 const status = ref('')
 const pdfError = ref(null)
 const pdfLoading = ref(false)
+const pdfText = ref('')
+const extractedData = ref({})
 const newRule = ref({
   field_name: '',
   data_type: '',
@@ -92,11 +94,11 @@ async function processEmail(email_id, event) {
     return
   }
 
-  const email = emails.value.find(e => e.id === email_id)
-  if (email.status === 'error') {
-    alert('This email has an error status and cannot be processed. Please check the email details.')
-    return
-  }
+  // const email = emails.value.find(e => e.id === email_id)
+  // if (email.status === 'error') {
+  //   alert('This email has an error status and cannot be processed. Please check the email details.')
+  //   return
+  // }
 
   try {
     const res = await fetch('http://localhost:8000/api/process-email/', {
@@ -222,9 +224,121 @@ function onPdfLoading() {
   pdfLoading.value = true
 }
 
-function onPdfLoaded() {
+function extractKeyValuePairs(text) {
+  const pairs = {}
+
+  // Common patterns for key-value pairs
+  const patterns = [
+    // Pattern 1: Key: Value
+    /([^:\n]+):\s*([^\n]+)/g,
+    // Pattern 2: Key = Value
+    /([^=\n]+)=\s*([^\n]+)/g,
+    // Pattern 3: Key - Value
+    /([^-\n]+)-\s*([^\n]+)/g,
+    // Pattern 4: Key Value (where Key is in a predefined list)
+    /(Invoice\s+Number|Date|Due\s+Date|Total|Amount|Subtotal|Tax|Vendor|Customer|Order\s+Number)\s+([^\n]+)/gi
+  ]
+
+  // Common invoice keys to look for
+  const commonKeys = [
+    'invoice number', 'invoice date', 'due date', 'total amount',
+    'subtotal', 'tax', 'vendor', 'customer', 'order number',
+    'payment terms', 'po number', 'account number', 'description'
+  ]
+
+  // Extract using patterns
+  patterns.forEach(pattern => {
+    let match
+    while ((match = pattern.exec(text)) !== null) {
+      const key = match[1].trim().toLowerCase()
+      const value = match[2].trim()
+
+      // Clean up the key
+      const cleanKey = key
+        .replace(/[^a-z0-9\s]/g, '') // Remove special characters
+        .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+        .trim()
+
+      if (cleanKey && value) {
+        pairs[cleanKey] = value
+      }
+    }
+  })
+
+  // Look for key-value pairs based on common keys
+  commonKeys.forEach(key => {
+    const regex = new RegExp(`${key}[\\s:]+([^\\n]+)`, 'i')
+    const match = text.match(regex)
+    if (match) {
+      pairs[key] = match[1].trim()
+    }
+  })
+
+  // Look for table-like structures
+  const lines = text.split('\n')
+  lines.forEach(line => {
+    // Look for tabular data
+    const parts = line.split(/\s{2,}/)
+    if (parts.length >= 2) {
+      const potentialKey = parts[0].trim().toLowerCase()
+      const potentialValue = parts[1].trim()
+
+      if (commonKeys.some(key => potentialKey.includes(key))) {
+        pairs[potentialKey] = potentialValue
+      }
+    }
+  })
+
+  return pairs
+}
+
+function onPdfLoaded(pdf) {
   pdfLoading.value = false
   pdfError.value = null
+
+  // Extract text from all pages
+  const numPages = pdf.numPages
+  const textPromises = []
+
+  for (let i = 1; i <= numPages; i++) {
+    textPromises.push(
+      pdf.getPage(i).then(page => {
+        return page.getTextContent().then(textContent => {
+          // Get text with position information
+          const items = textContent.items.map(item => ({
+            text: item.str,
+            x: item.transform[4],
+            y: item.transform[5],
+            width: item.width,
+            height: item.height
+          }))
+
+          // Sort items by position (top to bottom, left to right)
+          items.sort((a, b) => {
+            if (Math.abs(a.y - b.y) > 5) { // If items are on different lines
+              return b.y - a.y
+            }
+            return a.x - b.x
+          })
+
+          return items.map(item => item.text).join(' ')
+        })
+      })
+    )
+  }
+
+  Promise.all(textPromises).then(texts => {
+    const fullText = texts.join('\n\n')
+
+    // Extract key-value pairs
+    extractedData.value = extractKeyValuePairs(fullText)
+    pdfText.value = JSON.stringify(extractedData.value, null, 2)
+
+    console.log('Extracted data:', extractedData.value)
+  }).catch(error => {
+    console.error('Error extracting text from PDF:', error)
+    pdfError.value = 'Failed to extract text from PDF'
+  })
 }
 
 function addDataRule() {
@@ -317,6 +431,7 @@ function deleteDataRule(index) {
     </div>
     <div v-if="showAttachmentsModal" class="modal-backdrop show"></div>
 
+
     <!-- Processing Modal -->
     <div v-if="showProcessingModal" class="modal show d-block" tabindex="-1">
       <div class="modal-dialog modal-xl">
@@ -327,8 +442,9 @@ function deleteDataRule(index) {
           </div>
           <div class="modal-body">
             <div class="row">
+
               <!-- Left side: PDF iframe -->
-              <div class="col-md-6">
+              <div class="col-12 col-md-8">
                 <div class="card">
                   <div class="card-header">
                     <h6 class="mb-0">Invoice Preview</h6>
@@ -348,7 +464,8 @@ function deleteDataRule(index) {
                             @error="onPdfError"
                             @loading="onPdfLoading"
                             @loaded="onPdfLoaded"
-                          />
+                          ></VuePdfEmbed>
+                          <pre>{{ pdfText }}</pre>
                           <div v-if="pdfLoading" class="pdf-loading">
                             <div class="spinner-border text-primary" role="status">
                               <span class="visually-hidden">Loading PDF...</span>
@@ -368,7 +485,7 @@ function deleteDataRule(index) {
               </div>
 
               <!-- Right side: Form controls -->
-              <div class="col-md-6">
+              <div class="col-12 col-md-4">
                 <div class="card">
                   <div class="card-header">
                     <h6 class="mb-0">Data Rules</h6>

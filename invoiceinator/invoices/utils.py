@@ -16,16 +16,17 @@ logger = logging.getLogger(__name__)
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly',
           'https://www.googleapis.com/auth/spreadsheets']
 
-GMAIL_USER_ID = 'me'
-SHEET_ID = '13_nri-gfP9A8w69TXKujR0z_ma4Oqy4zywOJXeJZOUY'
+
 
 def get_gmail_service():
     creds = Credentials.from_authorized_user_file('token.json', SCOPES)
     return build('gmail', 'v1', credentials=creds)
 
+
 def get_sheets_service():
     creds = Credentials.from_authorized_user_file('token.json', SCOPES)
     return build('sheets', 'v4', credentials=creds)
+
 
 def extract_invoice_data(pdf_path):
     print(f"\nProcessing PDF: {pdf_path}")

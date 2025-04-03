@@ -12,6 +12,10 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 
+# TODO: Make this an environment variable or something
+SHEET_ID = '13_nri-gfP9A8w69TXKujR0z_ma4Oqy4zywOJXeJZOUY'
+VITE_SERVER_URL = 'http://localhost:5174'
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -26,7 +30,6 @@ SECRET_KEY = 'django-insecure-+cxud0t)q-pzzpoa=w3dkl))4i+w2om3*uyvc*n)+d44)eql&w
 DEBUG = True
 
 ALLOWED_HOSTS = []
-VITE_SERVER_URL = 'http://localhost:5174'
 
 
 # Application definition

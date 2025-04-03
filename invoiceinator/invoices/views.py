@@ -1,18 +1,17 @@
-import json
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from .utils import *
-from .models import *
+from .utils import get_gmail_service, get_sheets_service, extract_invoice_data
+from .models import ProcessedEmail, Vendor, VendorEmail
 from django.conf import settings
 import os
 from datetime import datetime
 import time
-import threading
-import glob
 import re
+import base64
 
 # Store temporary files with their creation time
 temp_files = {}
+
 
 def cleanup_temp_files():
     """Clean up temporary files older than 5 minutes"""
@@ -25,6 +24,7 @@ def cleanup_temp_files():
                 del temp_files[file_path]
             except Exception as e:
                 print(f"Error cleaning up file {file_path}: {e}")
+
 
 @api_view(['GET'])
 def list_invoice_emails(request):
@@ -94,6 +94,7 @@ def list_invoice_emails(request):
 
 @api_view(['POST'])
 def process_invoice_email(request):
+
     email_id = request.data.get('email_id')
     service = get_gmail_service()
     sheets_service = get_sheets_service()
@@ -177,10 +178,16 @@ def process_invoice_email(request):
 
                 # Save to spreadsheet
                 sheets_service.spreadsheets().values().append(
-                    spreadsheetId=SHEET_ID,
+                    spreadsheetId=settings.SHEET_ID,
                     range="Sheet1!A:C",
                     valueInputOption="USER_ENTERED",
-                    body={'values': [[invoice_data["invoice_number"], invoice_data["date"], invoice_data["total_amount"]]]}
+                    body={
+                        'values': [[
+                            invoice_data["invoice_number"],
+                            invoice_data["date"],
+                            invoice_data["total_amount"]
+                        ]]
+                    }
                 ).execute()
 
                 # Create or update ProcessedEmail record
@@ -224,9 +231,12 @@ def get_email_attachments(request, email_id):
             if part.get('filename'):
                 attachment = service.users().messages().attachments().get(
                     userId='me', messageId=email_id, id=part['body']['attachmentId']).execute()
+                # Import base64 at the top of the file
 
                 # Decode the attachment data
-                file_data = base64.urlsafe_b64decode(attachment['data'].encode('UTF-8'))
+                file_data = base64.urlsafe_b64decode(
+                    attachment['data'].encode('UTF-8')
+                )
 
                 # Create media directory if it doesn't exist
                 media_dir = settings.MEDIA_ROOT
@@ -263,6 +273,7 @@ def get_email_attachments(request, email_id):
         return Response({
             'error': str(e)
         }, status=500)
+
 
 @api_view(['POST'])
 def cleanup_attachment(request):
