@@ -1,6 +1,10 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue'
 import VuePdfEmbed from 'vue-pdf-embed'
+import { FontAwesomeIcon } from '@fortawesome/vue-fontawesome'
+import { Tooltip } from 'bootstrap'
+import vSelect from 'vue-select'
+import 'vue-select/dist/vue-select.css'
 
 const emails = ref([])
 const nextPageToken = ref(null)
@@ -17,13 +21,21 @@ const status = ref('')
 const pdfError = ref(null)
 const pdfLoading = ref(false)
 const pdfText = ref('')
+const maxResults = ref(10)
 const extractedData = ref({})
+const vendors = ref([])
 const newRule = ref({
   field_name: '',
   data_type: '',
   location_type: '',
   required: false
 })
+
+// Watch for maxResults changes
+watch(maxResults, () => {
+  console.log('maxResults changed', maxResults.value)
+  loadEmails()
+}, { debounce: 5000 })
 
 // Watch for location_type changes and initialize appropriate properties
 watch(() => newRule.value.location_type, (newType) => {
@@ -62,6 +74,43 @@ watch(() => newRule.value.location_type, (newType) => {
   }
 })
 
+function testDataRule(rule) {
+  if (!currentInvoice.value?.attachments?.[0]?.filename) {
+    alert('No PDF file available to test the rule')
+    return
+  }
+
+  const testData = {
+    pdf_filename: currentInvoice.value.attachments[0].filename,
+    rule: rule
+  }
+
+  fetch('http://localhost:8000/api/data-rules/test/', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(testData)
+  })
+  .then(response => {
+    if (!response.ok) {
+      throw new Error('Network response was not ok')
+    }
+    return response.json()
+  })
+  .then(data => {
+    if (data.error) {
+      alert(`Error testing rule: ${data.error}`)
+    } else {
+      alert(`Rule test result: ${JSON.stringify(data.result, null, 2)}`)
+    }
+  })
+  .catch(error => {
+    console.error('Error testing rule:', error)
+    alert('Failed to test rule. Please try again.')
+  })
+}
+
 async function loadEmails(pageToken = null) {
   loading.value = true
   try {
@@ -69,8 +118,16 @@ async function loadEmails(pageToken = null) {
     if (pageToken) {
       url.searchParams.append('pageToken', pageToken)
     }
+    url.searchParams.append('maxResults', maxResults.value)
     const res = await fetch(url)
     const data = await res.json()
+    // Add status property to each email object
+    data.emails = data.emails.map(email => ({
+      ...email,
+      status: email.status || 'pending', // Default to 'pending' if no status
+      busy: false,
+    }))
+
     if (pageToken) {
       emails.value = [...emails.value, ...data.emails]
     } else {
@@ -84,8 +141,25 @@ async function loadEmails(pageToken = null) {
   }
 }
 
+async function fetchVendors() {
+  try {
+    const res = await fetch('http://localhost:8000/api/vendors/')
+    const data = await res.json()
+    vendors.value = data || []
+  } catch (error) {
+    console.error('Error fetching vendors:', error)
+  }
+}
+
 onMounted(() => {
   loadEmails()
+  fetchVendors()
+
+  // Initialize Bootstrap tooltips
+  const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'))
+  tooltipTriggerList.map(function (tooltipTriggerEl) {
+    return new Tooltip(tooltipTriggerEl)
+  })
 })
 
 async function processEmail(email_id, event) {
@@ -93,6 +167,9 @@ async function processEmail(email_id, event) {
   if (event && event.target.closest('.btn-outline-primary')) {
     return
   }
+  const email = emails.value.find(e => e.id === email_id)
+  email.busy = true
+  let errorMessage = null
 
   // const email = emails.value.find(e => e.id === email_id)
   // if (email.status === 'error') {
@@ -109,14 +186,12 @@ async function processEmail(email_id, event) {
       body: JSON.stringify({ email_id })
     })
 
-    if (!res.ok) {
-      throw new Error(`HTTP error! status: ${res.status}`)
-    }
-
     const data = await res.json()
-    if (data.error) {
-      alert(`Error processing invoice: ${data.error}`)
-      return
+    if (data.status === 'error') {
+      email.status = 'error'
+      email.busy = false
+      errorMessage = data.message
+      // throw new Error(errorMessage)
     }
 
     // Update the email in the list with new data
@@ -129,28 +204,30 @@ async function processEmail(email_id, event) {
       }
     }
 
+    email.busy = false
+
     // Show processing modal with invoice data
     currentInvoice.value = data.invoice
     vendorName.value = data.vendor_name
     status.value = data.status
     showProcessingModal.value = true
   } catch (error) {
+    email.status = 'error'
+    email.busy = false
     console.error('Error processing email:', error)
-    alert('Failed to process email. Please try again later.')
+    alert('Failed to process invoice. ' + errorMessage)
   }
 }
 
 async function saveDataRules() {
   try {
-    const res = await fetch('http://localhost:8000/api/data-rules/', {
+    const res = await fetch('http://localhost:8000/api/data-rules/bulk_create/', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        invoice_id: currentInvoice.value.id,
         vendor_name: vendorName.value,
-        status: status.value,
         rules: dataRules.value
       })
     })
@@ -224,121 +301,9 @@ function onPdfLoading() {
   pdfLoading.value = true
 }
 
-function extractKeyValuePairs(text) {
-  const pairs = {}
-
-  // Common patterns for key-value pairs
-  const patterns = [
-    // Pattern 1: Key: Value
-    /([^:\n]+):\s*([^\n]+)/g,
-    // Pattern 2: Key = Value
-    /([^=\n]+)=\s*([^\n]+)/g,
-    // Pattern 3: Key - Value
-    /([^-\n]+)-\s*([^\n]+)/g,
-    // Pattern 4: Key Value (where Key is in a predefined list)
-    /(Invoice\s+Number|Date|Due\s+Date|Total|Amount|Subtotal|Tax|Vendor|Customer|Order\s+Number)\s+([^\n]+)/gi
-  ]
-
-  // Common invoice keys to look for
-  const commonKeys = [
-    'invoice number', 'invoice date', 'due date', 'total amount',
-    'subtotal', 'tax', 'vendor', 'customer', 'order number',
-    'payment terms', 'po number', 'account number', 'description'
-  ]
-
-  // Extract using patterns
-  patterns.forEach(pattern => {
-    let match
-    while ((match = pattern.exec(text)) !== null) {
-      const key = match[1].trim().toLowerCase()
-      const value = match[2].trim()
-
-      // Clean up the key
-      const cleanKey = key
-        .replace(/[^a-z0-9\s]/g, '') // Remove special characters
-        .replace(/\s+/g, ' ') // Replace multiple spaces with single space
-        .trim()
-
-      if (cleanKey && value) {
-        pairs[cleanKey] = value
-      }
-    }
-  })
-
-  // Look for key-value pairs based on common keys
-  commonKeys.forEach(key => {
-    const regex = new RegExp(`${key}[\\s:]+([^\\n]+)`, 'i')
-    const match = text.match(regex)
-    if (match) {
-      pairs[key] = match[1].trim()
-    }
-  })
-
-  // Look for table-like structures
-  const lines = text.split('\n')
-  lines.forEach(line => {
-    // Look for tabular data
-    const parts = line.split(/\s{2,}/)
-    if (parts.length >= 2) {
-      const potentialKey = parts[0].trim().toLowerCase()
-      const potentialValue = parts[1].trim()
-
-      if (commonKeys.some(key => potentialKey.includes(key))) {
-        pairs[potentialKey] = potentialValue
-      }
-    }
-  })
-
-  return pairs
-}
-
 function onPdfLoaded(pdf) {
   pdfLoading.value = false
   pdfError.value = null
-
-  // Extract text from all pages
-  const numPages = pdf.numPages
-  const textPromises = []
-
-  for (let i = 1; i <= numPages; i++) {
-    textPromises.push(
-      pdf.getPage(i).then(page => {
-        return page.getTextContent().then(textContent => {
-          // Get text with position information
-          const items = textContent.items.map(item => ({
-            text: item.str,
-            x: item.transform[4],
-            y: item.transform[5],
-            width: item.width,
-            height: item.height
-          }))
-
-          // Sort items by position (top to bottom, left to right)
-          items.sort((a, b) => {
-            if (Math.abs(a.y - b.y) > 5) { // If items are on different lines
-              return b.y - a.y
-            }
-            return a.x - b.x
-          })
-
-          return items.map(item => item.text).join(' ')
-        })
-      })
-    )
-  }
-
-  Promise.all(textPromises).then(texts => {
-    const fullText = texts.join('\n\n')
-
-    // Extract key-value pairs
-    extractedData.value = extractKeyValuePairs(fullText)
-    pdfText.value = JSON.stringify(extractedData.value, null, 2)
-
-    console.log('Extracted data:', extractedData.value)
-  }).catch(error => {
-    console.error('Error extracting text from PDF:', error)
-    pdfError.value = 'Failed to extract text from PDF'
-  })
 }
 
 function addDataRule() {
@@ -349,43 +314,68 @@ function addDataRule() {
 function deleteDataRule(index) {
   dataRules.value.splice(index, 1)
 }
+
+function editDataRule(rule) {
+  newRule.value = JSON.parse(JSON.stringify(rule))
+  // Expand the add new rule accordion
+  const accordionButton = document.querySelector('#addNewRuleCollapse')
+  if (accordionButton) {
+    accordionButton.classList.add('show')
+  }
+}
 </script>
 
 <template>
   <div class="container mt-4">
     <h2>Invoice Emails</h2>
+
+    <div class="row justify-content-end mb-3">
+      <div class="col-auto">
+        <div class="input-group">
+          <span class="input-group-text">Max Results</span>
+          <input type="number" class="form-control" v-model="maxResults" min="1" max="100">
+          <button class="btn btn-primary" @click="loadEmails()" :disabled="loading">
+            <span v-if="loading" class="spinner-border spinner-border-sm me-1"></span>
+            {{ loading ? 'Loading...' : 'Reload' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div class="list-group">
       <div v-for="email in emails"
-           :key="email.id"
-           :class="{
-             'list-group-item list-group-item-action': true,
-             'list-group-item-danger': email.status === 'error',
-             'list-group-item-success': email.status === 'processed',
-             'list-group-item-warning': !email.status || email.status === 'pending'
-           }"
-           @click="processEmail(email.id, $event)">
-        <div class="row header">
-          <div class="col">{{ email.snippet }}</div>
-          <div class="col-auto">
+        :key="email.id"
+        :class="{
+          'list-group-item list-group-item-action row mx-0': true,
+          'list-group-item-danger': email.status === 'error',
+          'list-group-item-success': email.status === 'processed',
+          'list-group-item-warning': !email.status || email.status === 'pending'
+        }"
+        @click="processEmail(email.id, $event)"
+      >
+        <div class="col-12 header">
+          {{ email.snippet }}
+          <!-- <div class="col-auto">
             <button class="btn btn-outline-primary btn-sm"
                     @click="downloadAttachments(email.id, $event)">
-              <i class="bi bi-paperclip me-1"></i>
+              <font-awesome-icon icon="paperclip" class="me-1" />
               {{ email.attachment_count }} attachments
             </button>
-          </div>
+          </div> -->
         </div>
-        <div class="mt-2 row justify-content-between text-muted footer">
+        <div class="mt-2 row col-12 justify-content-between text-muted footer">
           <div class="col-auto">From: {{ email.from }}</div>
           <div class="col-auto">Vendor: {{ email.vendor_name || 'N/A' }}</div>
           <div class="col-auto">Status: {{ email.status || 'pending' }}</div>
           <div class="col-auto">Date: {{ email.date }}</div>
         </div>
-      </div>
-    </div>
-
-    <div v-if="loading" class="text-center mt-3">
-      <div class="spinner-border text-primary" role="status">
-        <span class="visually-hidden">Loading...</span>
+        <div v-if="email.busy" class="col-12">
+          <div class="d-flex justify-content-center">
+            <div class="spinner-border spinner-border-sm text-primary" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -433,7 +423,7 @@ function deleteDataRule(index) {
 
 
     <!-- Processing Modal -->
-    <div v-if="showProcessingModal" class="modal show d-block" tabindex="-1">
+    <div v-if="showProcessingModal" id="processing-modal" class="modal show d-block" tabindex="-1">
       <div class="modal-dialog modal-xl">
         <div class="modal-content">
           <div class="modal-header">
@@ -447,8 +437,26 @@ function deleteDataRule(index) {
               <div class="col-12 col-md-8">
                 <div class="card">
                   <div class="card-header">
-                    <h6 class="mb-0">Invoice Preview</h6>
+                    <div class="row">
+                      <div class="col">
+                        <h6 class="mb-0">Invoice Preview</h6>
+                      </div>
+                      <div class="col-4">
+                        <div class="d-flex flex-row align-items-center">
+                          <label class="form-label small">Vendor:</label>
+                          <v-select
+                            v-model="vendorName"
+                            :options="vendors"
+                            :clearable="false"
+                            label="name"
+                            placeholder="Select a vendor"
+                            class="form-select-sm"
+                          />
+                        </div>
+                      </div>
+                    </div>
                   </div>
+
                   <div class="card-body p-0" style="height: 600px;">
                     <div v-if="currentInvoice?.attachments?.length" class="attachments-container">
                       <div v-for="(attachment, index) in currentInvoice.attachments"
@@ -499,6 +507,8 @@ function deleteDataRule(index) {
                             Add New Data Rule
                           </button>
                         </h2>
+
+                        <!-- DataRule editor -->
                         <div id="addNewRuleCollapse" class="accordion-collapse collapse show" data-bs-parent="#dataRulesAccordion">
                           <div class="accordion-body">
                             <form @submit.prevent="addDataRule" class="mb-3">
@@ -516,10 +526,11 @@ function deleteDataRule(index) {
                                     <option value="currency">Currency</option>
                                     <option value="email">Email</option>
                                     <option value="phone">Phone</option>
+                                    <option value="line_items">Line Items</option>
                                   </select>
                                 </div>
                                 <div class="col-md-3">
-                                  <label class="form-label small">Location Type</label>
+                                  <label class="form-label small">Locator</label>
                                   <select class="form-select form-select-sm" v-model="newRule.location_type" required>
                                     <option value="coordinates">Coordinates</option>
                                     <option value="keyword">Keyword</option>
@@ -589,9 +600,12 @@ function deleteDataRule(index) {
 
                               <div class="row g-2 mt-2">
                                 <div class="col-12">
+                                  <button type="button" class="btn btn-outline-danger btn-sm" @click="testDataRule(newRule)">Test Rule</button>
                                   <button type="submit" class="btn btn-primary btn-sm">Add Rule</button>
                                 </div>
                               </div>
+
+
                             </form>
                           </div>
                         </div>
@@ -601,9 +615,13 @@ function deleteDataRule(index) {
                       <div class="accordion-item">
                         <h2 class="accordion-header">
                           <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#existingRulesCollapse">
-                            Existing Rules
+                            <div class="w-100">
+                              Existing Rules
+                              <span v-if="dataRules.length > 0" class="badge bg-primary mx-2 float-end">{{ dataRules.length }}</span>
+                            </div>
                           </button>
                         </h2>
+
                         <div id="existingRulesCollapse" class="accordion-collapse collapse" data-bs-parent="#dataRulesAccordion">
                           <div class="accordion-body">
                             <div class="table-responsive">
@@ -623,12 +641,37 @@ function deleteDataRule(index) {
                                     <td><span class="badge bg-secondary">{{ rule.data_type }}</span></td>
                                     <td><span class="badge bg-info">{{ rule.location_type }}</span></td>
                                     <td>
-                                      <i :class="rule.required ? 'bi bi-check-circle-fill text-success' : 'bi bi-x-circle-fill text-danger'"></i>
+                                      <font-awesome-icon :icon="rule.required ? 'check-circle' : 'times-circle'"
+                                        :class="rule.required ? 'text-success' : 'text-danger'" />
                                     </td>
                                     <td class="text-end">
-                                      <button class="btn btn-sm btn-outline-danger" @click="deleteDataRule(index)">
-                                        <i class="bi bi-trash"></i>
-                                      </button>
+                                      <font-awesome-icon
+                                        icon="play"
+                                        class="text-primary mx-1"
+                                        style="cursor: pointer"
+                                        data-bs-toggle="tooltip"
+                                        data-bs-placement="top"
+                                        title="Test this rule"
+                                        @click="testDataRule(rule)"
+                                      ></font-awesome-icon>
+                                      <font-awesome-icon
+                                        icon="edit"
+                                        class="text-secondary mx-1"
+                                        style="cursor: pointer"
+                                        data-bs-toggle="tooltip"
+                                        data-bs-placement="top"
+                                        title="Edit this rule"
+                                        @click="editDataRule(rule)"
+                                      ></font-awesome-icon>
+                                      <font-awesome-icon
+                                        icon="trash"
+                                        class="text-danger mx-1"
+                                        style="cursor: pointer"
+                                        data-bs-toggle="tooltip"
+                                        data-bs-placement="top"
+                                        title="Delete this rule"
+                                        @click="deleteDataRule(index)"
+                                      ></font-awesome-icon>
                                     </td>
                                   </tr>
                                 </tbody>
@@ -645,7 +688,7 @@ function deleteDataRule(index) {
           </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" @click="showProcessingModal = false">Cancel</button>
-            <button type="button" class="btn btn-primary" @click="saveDataRules">Save</button>
+            <button type="button" class="btn btn-primary" @click="saveDataRules">Save Config and Update Google Sheet</button>
           </div>
         </div>
       </div>
@@ -655,7 +698,7 @@ function deleteDataRule(index) {
 </template>
 
 
-<style scoped lang="scss">
+<style lang="scss">
 .list-group-item {
   cursor: pointer;
 }
@@ -746,5 +789,24 @@ function deleteDataRule(index) {
   transform: translate(-50%, -50%);
   text-align: center;
   padding: 1rem;
+}
+
+.accordion-body {
+  padding: 0.5rem;
+}
+
+.form-select-sm {
+  .vs-selected-options {
+
+  }
+  .vs__dropdown-toggle {
+    background-color: #fff;
+  }
+
+  &.vs--open {
+    input {
+      width: 100%
+    }
+  }
 }
 </style>

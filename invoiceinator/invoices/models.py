@@ -9,9 +9,6 @@ STATUS_CHOICES = [
 
 INVOICE_TYPE_CHOICES = [
     ('pdf', 'PDF'),
-    ('csv', 'CSV'),
-    ('excel', 'Excel'),
-    ('image', 'Image'),
 ]
 
 DATA_TYPE_CHOICES = [
@@ -21,6 +18,7 @@ DATA_TYPE_CHOICES = [
     ('currency', 'Currency'),
     ('email', 'Email'),
     ('phone', 'Phone'),
+    ('line_items', 'Line Items'),  # Add this
 ]
 
 LOCATION_TYPE_CHOICES = [
@@ -42,7 +40,19 @@ class DataRule(models.Model):
     coordinates = models.JSONField(null=True, blank=True, help_text="For coordinate-based extraction: {'x': float, 'y': float, 'width': float, 'height': float}")
     keyword = models.CharField(max_length=255, null=True, blank=True, help_text="Keyword to search for")
     regex_pattern = models.CharField(max_length=255, null=True, blank=True, help_text="Regular expression pattern")
-    table_config = models.JSONField(null=True, blank=True, help_text="For table-based extraction: {'row_index': int, 'col_index': int, 'header_text': str}")
+    table_config = models.JSONField(null=True, blank=True,
+        help_text="For table-based extraction: {'start_row_after_header': int, 'item_columns': key/value pairs, 'header_text': str}",
+        default={
+            "header_text": "Description",
+            "item_columns": {
+                "id": 0,
+                "description": 1,
+                "quantity": 2,
+                "unit_price": 3,
+            },
+            "start_row_after_header": 1
+        }
+    )
 
     # Validation rules
     required = models.BooleanField(default=True)

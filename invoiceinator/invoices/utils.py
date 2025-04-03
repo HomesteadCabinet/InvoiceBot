@@ -28,25 +28,37 @@ def get_sheets_service():
     return build('sheets', 'v4', credentials=creds)
 
 
-def extract_invoice_data(pdf_path):
+def extract_invoice_data(pdf_path, vendor=None):
+    """Extract data from a PDF invoice using vendor-specific data rules."""
     print(f"\nProcessing PDF: {pdf_path}")
 
+    # Initialize DataExtractor
+    extractor = DataExtractor(pdf_path, debug=True)
+
+    # If vendor is provided, use their data rules
+    if vendor:
+        data_rules = vendor.data_rules.all()
+        if data_rules:
+            try:
+                extracted_data = extractor.extract_data(data_rules)
+                print("\n✓ Successfully extracted data using vendor rules:")
+                for field, value in extracted_data.items():
+                    print(f"  {field}: {value}")
+                return extracted_data
+            except ValueError as e:
+                print(f"\n❌ Error extracting data: {str(e)}")
+                raise
+
+    # Fallback to default extraction if no vendor rules or extraction failed
+    print("No vendor rules found or extraction failed, using default extraction")
     with pdfplumber.open(pdf_path) as pdf:
-        print(f"Number of pages in PDF: {len(pdf.pages)}")
         text = ''
-        for i, page in enumerate(pdf.pages):
+        for page in pdf.pages:
             page_text = page.extract_text()
-            print(f"\nPage {i+1} text length: {len(page_text) if page_text else 0} characters")
             if page_text:
-                print("First 200 characters of page:")
-                print(page_text[:200])
-            text += page_text
+                text += page_text
 
-    print(f"\nTotal extracted text length: {len(text)} characters")
-    print("First 500 characters of full text:")
-    print(text[:500])
-
-    # More flexible patterns that handle various formats
+    # Default patterns for common invoice fields
     patterns = {
         'invoice_number': [
             r'Invoice\s*(?:Number|No|#)?[: ]*([A-Z0-9-]+)',
@@ -56,36 +68,29 @@ def extract_invoice_data(pdf_path):
         'date': [
             r'Date[: ]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
             r'Invoice\s*Date[: ]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
-            r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',  # Fallback to first date found
+            r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
         ],
         'total_amount': [
             r'Total\s*(?:Amount)?[: ]*[\$£]?([\d,]+\.\d{2})',
             r'Amount\s*Due[: ]*[\$£]?([\d,]+\.\d{2})',
-            r'[\$£]?([\d,]+\.\d{2})',  # Fallback to last amount found
+            r'[\$£]?([\d,]+\.\d{2})',
         ]
     }
 
     extracted_data = {}
     errors = []
 
-    print("\nAttempting to match patterns:")
     for field, field_patterns in patterns.items():
-        print(f"\nTrying to find {field}:")
         value = None
-        for i, pattern in enumerate(field_patterns):
-            print(f"  Pattern {i+1}: {pattern}")
+        for pattern in field_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 value = match.group(1)
-                print(f"  ✓ Found match: {value}")
                 break
-            else:
-                print("  ✗ No match")
 
         if value:
             extracted_data[field] = value
         else:
-            print(f"  ✗ Failed to find {field} with any pattern")
             errors.append(f"Could not find {field}")
 
     if errors:
@@ -93,7 +98,7 @@ def extract_invoice_data(pdf_path):
         print(f"\n❌ {error_msg}")
         raise ValueError(error_msg)
 
-    print("\n✓ Successfully extracted all data:")
+    print("\n✓ Successfully extracted data using default patterns:")
     for field, value in extracted_data.items():
         print(f"  {field}: {value}")
 
@@ -101,25 +106,6 @@ def extract_invoice_data(pdf_path):
 
 class DataExtractor:
     """Enhanced PDF data extraction utility with support for multiple extraction methods."""
-
-    # Default patterns for common invoice fields
-    DEFAULT_PATTERNS = {
-        'invoice_number': [
-            r'Invoice\s*(?:Number|No|#)?[: ]*([A-Z0-9-]+)',
-            r'INV[- ]?(\d+)',
-            r'Invoice\s*[: ]*([A-Z0-9-]+)',
-        ],
-        'date': [
-            r'Date[: ]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
-            r'Invoice\s*Date[: ]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
-            r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',  # Fallback to first date found
-        ],
-        'total_amount': [
-            r'Total\s*(?:Amount)?[: ]*[\$£]?([\d,]+\.\d{2})',
-            r'Amount\s*Due[: ]*[\$£]?([\d,]+\.\d{2})',
-            r'[\$£]?([\d,]+\.\d{2})',  # Fallback to last amount found
-        ]
-    }
 
     def __init__(self, pdf_path: str, debug: bool = False):
         """Initialize the DataExtractor with a PDF file path."""
@@ -252,10 +238,12 @@ class DataExtractor:
                 self._log(f"Keyword '{rule.keyword}' not found")
                 return None
 
-            # Extract text after the keyword (up to 100 characters)
+            # Extract text after the keyword until the first newline
             start_pos = keyword_pos + len(rule.keyword)
-            end_pos = min(start_pos + 100, len(text))
-            result = text[start_pos:end_pos].strip()
+            end_pos = text.find('\n', start_pos)
+            if end_pos == -1:  # If no newline found, use the end of text
+                end_pos = len(text)
+            result = text[start_pos:end_pos].replace(':', '').strip()
             self._log(f"Extracted by keyword: {result}")
             return result
         except Exception as e:
@@ -310,50 +298,87 @@ class DataExtractor:
             self._log(f"Error extracting from table: {str(e)}")
             return None
 
-    def extract_data(self, rules: list['DataRule']) -> Dict[str, Any]:
-        """Extract data from PDF using provided rules."""
-        result = {}
-        errors = []
+    def extract_line_items(self, page, rule: 'DataRule') -> List[Dict[str, Any]]:
+        items = []
 
-        self._log(f"Starting data extraction with {len(rules)} rules")
-
-        for page in self.pdf.pages:
-            for rule in rules:
-                if rule.field_name in result:
+        if rule.location_type == 'table':
+            tables = page.extract_tables()
+            for table in tables:
+                # Find header row
+                header_row_idx = None
+                for idx, row in enumerate(table):
+                    if rule.table_config['header_text'] in row:
+                        header_row_idx = idx
+                        break
+                if header_row_idx is None:
                     continue
 
-                # Extract text based on location type
-                text = None
-                if rule.location_type == 'coordinates':
-                    text = self._extract_by_coordinates(page, rule)
-                elif rule.location_type == 'keyword':
-                    text = self._extract_by_keyword(page, rule)
-                elif rule.location_type == 'regex':
-                    text = self._extract_by_regex(page, rule)
-                elif rule.location_type == 'table':
-                    text = self._extract_by_table(page, rule)
+                item_columns = rule.table_config['item_columns']
+                for row in table[header_row_idx + rule.table_config.get('start_row_after_header', 1):]:
+                    if not row or all(not cell.strip() for cell in row if cell):
+                        continue
+                    item = {
+                        'description': row[item_columns['description']].strip(),
+                        'quantity': row[item_columns['quantity']].strip(),
+                        'unit_price': row[item_columns['unit_price']].strip(),
+                        'amount': row[item_columns['amount']].strip(),
+                    }
+                    items.append(item)
+            return items
 
-                if text:
-                    # Apply pre-processing
-                    text = self._pre_process_text(text, rule.pre_processing)
+        elif rule.location_type == 'regex':
+            text = page.extract_text()
+            pattern = re.compile(rule.regex_pattern)
+            matches = pattern.findall(text)
+            for match in matches:
+                items.append({
+                    'quantity': match[0],
+                    'description': match[1],
+                    'unit_price': match[2],
+                    'amount': match[3],
+                })
+            return items
+        return items
 
-                    # Validate
-                    if self._validate_text(text, rule):
-                        # Apply post-processing
-                        processed_value = self._post_process_text(text, rule.data_type, rule.post_processing)
-                        result[rule.field_name] = processed_value
-                    else:
-                        errors.append(f"Validation failed for {rule.field_name}")
-                else:
-                    errors.append(f"Could not extract {rule.field_name}")
+    def extract_data(self, rules: list['DataRule']) -> Dict[str, Any]:
+        extracted_data = {}
+        errors = []
 
-        if errors and any(rule.required for rule in rules):
-            error_msg = f"Failed to extract required data: {', '.join(errors)}"
-            self._log(f"❌ {error_msg}")
-            raise ValueError(error_msg)
+        for rule in rules:
+            if rule.data_type == 'line_items':
+                line_items = []
+                for page in self.pdf.pages:
+                    line_items += self.extract_line_items(page, rule)
+                extracted_data[rule.field_name] = line_items
+            else:
+                for page in self.pdf.pages:
+                    text = None
+                    # Use the appropriate extraction method based on location type
+                    if rule.location_type == 'coordinates':
+                        text = self._extract_by_coordinates(page, rule)
+                    elif rule.location_type == 'keyword':
+                        text = self._extract_by_keyword(page, rule)
+                    elif rule.location_type == 'regex':
+                        text = self._extract_by_regex(page, rule)
+                    elif rule.location_type == 'table':
+                        text = self._extract_by_table(page, rule)
+                    elif rule.location_type == 'header':
+                        # For header type, we can use the table method with specific config
+                        text = self._extract_by_table(page, rule)
 
-        self._log("✓ Successfully extracted all data")
-        return result
+                    if text:
+                        text = self._pre_process_text(text, rule.pre_processing)
+                        text = self._post_process_text(text, rule.data_type, rule.post_processing)
+                        extracted_data[rule.field_name] = text
+                        break
+                if rule.required and rule.field_name not in extracted_data:
+                    errors.append(f"{rule.field_name} could not be extracted.")
+
+        if errors:
+            raise ValueError(f"Extraction failed for fields: {', '.join(errors)}")
+
+        return extracted_data
+
 
     def extract_all_pages(self, rules: list['DataRule']) -> list[Dict[str, Any]]:
         """Extract data from all pages of the PDF."""
@@ -367,23 +392,3 @@ class DataExtractor:
                 results.append(page_result)
 
         return results
-
-    def extract_with_default_patterns(self) -> Dict[str, Any]:
-        """Extract data using default patterns for common invoice fields."""
-        self._log("Using default patterns for extraction")
-        result = {}
-
-        # Convert default patterns to DataRule-like structure
-        for field, patterns in self.DEFAULT_PATTERNS.items():
-            for pattern in patterns:
-                try:
-                    text = self.pdf.pages[0].extract_text()
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        result[field] = match.group(1)
-                        self._log(f"Found {field}: {result[field]}")
-                        break
-                except Exception as e:
-                    self._log(f"Error extracting {field}: {str(e)}")
-
-        return result
