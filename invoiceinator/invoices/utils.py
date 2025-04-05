@@ -28,82 +28,6 @@ def get_sheets_service():
     return build('sheets', 'v4', credentials=creds)
 
 
-def extract_invoice_data(pdf_path, vendor=None):
-    """Extract data from a PDF invoice using vendor-specific data rules."""
-    print(f"\nProcessing PDF: {pdf_path}")
-
-    # Initialize DataExtractor
-    extractor = DataExtractor(pdf_path, debug=True)
-
-    # If vendor is provided, use their data rules
-    if vendor:
-        data_rules = vendor.data_rules.all()
-        if data_rules:
-            try:
-                extracted_data = extractor.extract_data(data_rules)
-                print("\n✓ Successfully extracted data using vendor rules:")
-                for field, value in extracted_data.items():
-                    print(f"  {field}: {value}")
-                return extracted_data
-            except ValueError as e:
-                print(f"\n❌ Error extracting data: {str(e)}")
-                raise
-
-    # Fallback to default extraction if no vendor rules or extraction failed
-    print("No vendor rules found or extraction failed, using default extraction")
-    with pdfplumber.open(pdf_path) as pdf:
-        text = ''
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text
-
-    # Default patterns for common invoice fields
-    patterns = {
-        'invoice_number': [
-            r'Invoice\s*(?:Number|No|#)?[: ]*([A-Z0-9-]+)',
-            r'INV[- ]?(\d+)',
-            r'Invoice\s*[: ]*([A-Z0-9-]+)',
-        ],
-        'date': [
-            r'Date[: ]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
-            r'Invoice\s*Date[: ]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
-            r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
-        ],
-        'total_amount': [
-            r'Total\s*(?:Amount)?[: ]*[\$£]?([\d,]+\.\d{2})',
-            r'Amount\s*Due[: ]*[\$£]?([\d,]+\.\d{2})',
-            r'[\$£]?([\d,]+\.\d{2})',
-        ]
-    }
-
-    extracted_data = {}
-    errors = []
-
-    for field, field_patterns in patterns.items():
-        value = None
-        for pattern in field_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                value = match.group(1)
-                break
-
-        if value:
-            extracted_data[field] = value
-        else:
-            errors.append(f"Could not find {field}")
-
-    if errors:
-        error_msg = f"Failed to extract required data: {', '.join(errors)}"
-        print(f"\n❌ {error_msg}")
-        raise ValueError(error_msg)
-
-    print("\n✓ Successfully extracted data using default patterns:")
-    for field, value in extracted_data.items():
-        print(f"  {field}: {value}")
-
-    return extracted_data
-
 class DataExtractor:
     """Enhanced PDF data extraction utility with support for multiple extraction methods."""
 
@@ -209,22 +133,12 @@ class DataExtractor:
 
         return True
 
-    def _extract_by_coordinates(self, page, rule: 'DataRule') -> Optional[str]:
-        """Extract text using coordinates."""
-        coords = rule.coordinates
-        if not coords:
-            return None
-
-        try:
-            # Extract text from the specified coordinates
-            text = page.crop((coords['x'], coords['y'],
-                            coords['x'] + coords['width'],
-                            coords['y'] + coords['height'])).extract_text()
-            self._log(f"Extracted by coordinates: {text}")
-            return text
-        except Exception as e:
-            self._log(f"Error extracting by coordinates: {str(e)}")
-            return None
+    def _is_point_in_bbox(self, x: float, y: float, bbox: dict) -> bool:
+        """Check if a point (x,y) is within a bounding box."""
+        if not bbox:
+            return True  # If no bbox specified, consider all points valid
+        return (bbox['x'] <= x <= bbox['x'] + bbox['width'] and
+                bbox['y'] <= y <= bbox['y'] + bbox['height'])
 
     def _extract_by_keyword(self, page, rule: 'DataRule') -> Optional[str]:
         """Extract text near a keyword."""
@@ -232,7 +146,14 @@ class DataExtractor:
             return None
 
         try:
-            text = page.extract_text()
+            # Extract words and filter by bbox
+            words = page.extract_words()
+            filtered_words = []
+            for word in words:
+                if self._is_point_in_bbox(word['x0'], word['top'], rule.bbox):
+                    filtered_words.append(word['text'])
+            text = ' '.join(filtered_words)
+
             keyword_pos = text.find(rule.keyword)
             if keyword_pos == -1:
                 self._log(f"Keyword '{rule.keyword}' not found")
@@ -256,7 +177,14 @@ class DataExtractor:
             return None
 
         try:
-            text = page.extract_text()
+            # Extract words and filter by bbox
+            words = page.extract_words()
+            filtered_words = []
+            for word in words:
+                if self._is_point_in_bbox(word['x0'], word['top'], rule.bbox):
+                    filtered_words.append(word['text'])
+            text = ' '.join(filtered_words)
+
             match = re.search(rule.regex_pattern, text)
             result = match.group(0) if match else None
             self._log(f"Extracted by regex: {result}")
@@ -300,34 +228,61 @@ class DataExtractor:
 
     def extract_line_items(self, page, rule: 'DataRule') -> List[Dict[str, Any]]:
         items = []
+        header_row = None
 
         if rule.location_type == 'table':
             tables = page.extract_tables()
             for table in tables:
-                # Find header row
+                # Find header row based on config or keyword
                 header_row_idx = None
-                for idx, row in enumerate(table):
-                    if rule.table_config['header_text'] in row:
-                        header_row_idx = idx
-                        break
-                if header_row_idx is None:
-                    continue
+                item_columns = rule.table_config.get('item_columns', {})
+                header_keyword = rule.table_config.get('header_text', 'code').lower()
 
-                item_columns = rule.table_config['item_columns']
+                for idx, row in enumerate(table):
+                    if row and any(cell and header_keyword in str(cell).lower() for cell in row):
+                        header_row_idx = idx
+                        header_row = row  # Store the header row
+
+                        # Auto-detect item_columns if not explicitly provided
+                        if not item_columns:
+                            self._log(f"Auto-detecting item columns from header: {row}")
+                            for col_idx, col in enumerate(row):
+                                col_text = str(col).strip().lower()
+                                if "code" in col_text:
+                                    item_columns["id"] = col_idx
+                                elif "desc" in col_text or "product" in col_text:
+                                    item_columns["description"] = col_idx
+                                elif "qty" in col_text or "quantity" in col_text:
+                                    item_columns["quantity"] = col_idx
+                                elif "unit" in col_text:
+                                    item_columns["unit_price"] = col_idx
+                                elif "ext" in col_text or "amount" in col_text or "total" in col_text:
+                                    item_columns["amount"] = col_idx
+                        break
+
+                if header_row_idx is None or not item_columns:
+                    continue  # No valid header found or failed to map columns
+
                 for row in table[header_row_idx + rule.table_config.get('start_row_after_header', 1):]:
-                    if not row or all(not cell.strip() for cell in row if cell):
-                        continue
-                    item = {
-                        'description': row[item_columns['description']].strip(),
-                        'quantity': row[item_columns['quantity']].strip(),
-                        'unit_price': row[item_columns['unit_price']].strip(),
-                        'amount': row[item_columns['amount']].strip(),
-                    }
-                    items.append(item)
-            return items
+                    if not row or all(not (cell or '').strip() for cell in row):
+                        continue  # Skip empty rows
+
+                    item = {}
+                    for key, col_idx in item_columns.items():
+                        if col_idx < len(row):
+                            item[key] = (row[col_idx] or '').strip()
+                    if item:
+                        items.append(item)
 
         elif rule.location_type == 'regex':
-            text = page.extract_text()
+            # Extract words and filter by bbox
+            words = page.extract_words()
+            filtered_words = []
+            for word in words:
+                if self._is_point_in_bbox(word['x0'], word['top'], rule.bbox):
+                    filtered_words.append(word['text'])
+            text = ' '.join(filtered_words)
+
             pattern = re.compile(rule.regex_pattern)
             matches = pattern.findall(text)
             for match in matches:
@@ -337,8 +292,11 @@ class DataExtractor:
                     'unit_price': match[2],
                     'amount': match[3],
                 })
-            return items
-        return items
+
+        return {
+            'header_row': header_row,
+            'items': items
+        }
 
     def extract_data(self, rules: list['DataRule']) -> Dict[str, Any]:
         extracted_data = {}
@@ -346,24 +304,31 @@ class DataExtractor:
 
         for rule in rules:
             if rule.data_type == 'line_items':
-                line_items = []
+                line_items_data = {
+                    'header_row': None,
+                    'items': []
+                }
                 for page in self.pdf.pages:
-                    line_items += self.extract_line_items(page, rule)
-                extracted_data[rule.field_name] = line_items
+                    result = self.extract_line_items(page, rule)
+                    if result['header_row'] and not line_items_data['header_row']:
+                        line_items_data['header_row'] = result['header_row']
+                    if result['items']:
+                        line_items_data['items'].extend(result['items'])
+                if line_items_data['items']:
+                    extracted_data[rule.field_name] = line_items_data
+                elif rule.required:
+                    errors.append(f"{rule.field_name} could not be extracted.")
             else:
                 for page in self.pdf.pages:
                     text = None
                     # Use the appropriate extraction method based on location type
-                    if rule.location_type == 'coordinates':
-                        text = self._extract_by_coordinates(page, rule)
-                    elif rule.location_type == 'keyword':
+                    if rule.location_type == 'keyword':
                         text = self._extract_by_keyword(page, rule)
                     elif rule.location_type == 'regex':
                         text = self._extract_by_regex(page, rule)
                     elif rule.location_type == 'table':
                         text = self._extract_by_table(page, rule)
                     elif rule.location_type == 'header':
-                        # For header type, we can use the table method with specific config
                         text = self._extract_by_table(page, rule)
 
                     if text:
@@ -379,6 +344,106 @@ class DataExtractor:
 
         return extracted_data
 
+    def extract_tables(self, page_number: Optional[int] = None) -> List[List[List[str]]]:
+        """
+        Extract all tables from the PDF or from a specific page.
+
+        Args:
+            page_number: Optional page number (1-based index). If None, extracts from all pages.
+
+        Returns:
+            A list of tables, where each table is a list of rows, and each row is a list of cell values.
+        """
+        tables = []
+
+        try:
+            if page_number is not None:
+                if 1 <= page_number <= len(self.pdf.pages):
+                    page = self.pdf.pages[page_number - 1]
+                    extracted = page.find_tables()
+                    if extracted:
+                        tables.extend(extracted)
+                    self._log(f"Extracted {len(extracted)} tables from page {page_number}")
+                else:
+                    raise ValueError(f"Page number {page_number} is out of range")
+            else:
+                for idx, page in enumerate(self.pdf.pages, 1):
+                    extracted = page.find_tables()
+                    if extracted:
+                        tables.extend(extracted)
+                    self._log(f"Extracted {len(extracted)} tables from page {idx}")
+
+            # Clean up the tables by converting None to empty string and stripping whitespace
+            cleaned_tables = []
+            for table in tables:
+                cleaned_table = []
+                # Extract the actual table data using extract()
+                table_data = table.extract()
+                for row in table_data:
+                    cleaned_row = [str(cell).strip() if cell is not None else "" for cell in row]
+                    cleaned_table.append(cleaned_row)
+                cleaned_tables.append(cleaned_table)
+
+            return cleaned_tables
+
+        except Exception as e:
+            self._log(f"Error extracting tables: {str(e)}")
+            import pdb; pdb.set_trace()
+
+            return []
+
+    def extract_text(self, page_number: Optional[int] = None) -> str:
+        """
+        Extract text from the PDF or from a specific page with layout preservation.
+
+        Args:
+            page_number: Optional page number (1-based index). If None, extracts from all pages.
+
+        Returns:
+            A string containing the extracted text with preserved layout.
+        """
+        try:
+            self._log(f"Starting text extraction. Page number: {page_number}, Total pages: {len(self.pdf.pages)}")
+
+            if page_number is not None:
+                if 1 <= page_number <= len(self.pdf.pages):
+                    page = self.pdf.pages[page_number - 1]
+                    # Extract text lines with character information
+                    text_lines = page.extract_text_lines(layout=False, strip=True, return_chars=True)
+
+                    if text_lines:
+                        # Join the text lines, preserving line breaks
+                        text = '\n'.join(line['text'] for line in text_lines)
+                        self._log(f"Successfully extracted text, length: {len(text)}")
+                    else:
+                        self._log("No text could be extracted from page")
+                        text = ""
+
+                    return text
+                else:
+                    raise ValueError(f"Page number {page_number} is out of range")
+            else:
+                text_parts = []
+                for idx, page in enumerate(self.pdf.pages, 1):
+                    self._log(f"Processing page {idx}")
+                    # Extract text lines with character information
+                    text_lines = page.extract_text_lines(layout=False, strip=True, return_chars=True)
+
+                    if text_lines:
+                        # Join the text lines, preserving line breaks
+                        text = '\n'.join(line['text'] for line in text_lines)
+                        text_parts.append(text)
+                        self._log(f"Added text from page {idx}, length: {len(text)}")
+                    else:
+                        self._log(f"No text could be extracted from page {idx}")
+
+                final_text = "\n\n".join(text_parts)
+                self._log(f"Final combined text length: {len(final_text)}")
+                return final_text
+
+        except Exception as e:
+            self._log(f"Error extracting text: {str(e)}")
+            return str(e)
 
     def extract_all_pages(self, rules: list['DataRule']) -> list[Dict[str, Any]]:
         """Extract data from all pages of the PDF."""

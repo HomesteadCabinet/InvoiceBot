@@ -2,7 +2,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
-from .utils import get_gmail_service, get_sheets_service, extract_invoice_data, DataExtractor
+from .utils import get_gmail_service, get_sheets_service, DataExtractor
 from .models import ProcessedEmail, Vendor, VendorEmail, DataRule
 from .serializers import DataRuleSerializer, VendorSerializer
 from django.conf import settings
@@ -28,6 +28,55 @@ def cleanup_temp_files():
                 del temp_files[file_path]
             except Exception as e:
                 print(f"Error cleaning up file {file_path}: {e}")
+
+
+def write_to_spreadsheet(invoice_data: dict, vendor: Vendor = None) -> None:
+    """
+    Write invoice data to Google Spreadsheet.
+
+    Args:
+        invoice_data (dict): Dictionary containing invoice data
+        vendor (Vendor, optional): Vendor object if available
+
+    Raises:
+        Exception: If there's an error writing to the spreadsheet
+    """
+    try:
+        sheets_service = get_sheets_service()
+
+        # Get column mappings from vendor
+        column_mappings = vendor.spreadsheet_column_mapping if vendor else {}
+
+        # Create a row with empty values for all columns up to the highest mapped column
+        max_col = 'A'
+        for col in column_mappings.values():
+            if col > max_col:
+                max_col = col
+
+        # Create a list with empty strings up to the max column
+        row_data = [''] * (ord(max_col) - ord('A') + 1)
+
+        # Fill in the data based on column mappings
+        for field_name, col in column_mappings.items():
+            if field_name in invoice_data:
+                col_index = ord(col) - ord('A')
+                row_data[col_index] = invoice_data.get(field_name, '')
+
+        # Add vendor name and timestamp at the end if not mapped
+        if vendor and 'vendor_name' not in column_mappings:
+            row_data.append(vendor.name)
+        if 'timestamp' not in column_mappings:
+            row_data.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+        # Write to spreadsheet
+        sheets_service.spreadsheets().values().append(
+            spreadsheetId=settings.SHEET_ID,
+            range=f"Sheet1!A:{chr(ord('A') + len(row_data) - 1)}",
+            valueInputOption="USER_ENTERED",
+            body={'values': [row_data]}
+        ).execute()
+    except Exception as e:
+        raise Exception(f"Failed to write to spreadsheet: {str(e)}")
 
 
 @api_view(['GET'])
@@ -100,12 +149,11 @@ def list_invoice_emails(request):
 def process_invoice_email(request):
     email_id = request.data.get('email_id')
     service = get_gmail_service()
-    sheets_service = get_sheets_service()
     email = service.users().messages().get(userId='me', id=email_id).execute()
     vendor_name = "Unknown"
     errors = []
     attachments = []
-    invoice_data = {"attachments": []}
+    invoice_data = {"attachments": [], "tables": [], "text": ""}
 
     # Extract sender email from headers
     from_header = next((header['value'] for header in email['payload']['headers'] if header['name'].lower() == 'from'), None)
@@ -176,46 +224,35 @@ def process_invoice_email(request):
                 attachments.append(attachment_info)
                 invoice_data["attachments"] = attachments
 
+                # Extract data from PDF using vendor-specific rules if available
+                extractor = DataExtractor(file_path, debug=True)
+
+                # Extract all tables from the PDF and add to invoice_data
+                all_tables = []
                 try:
-                    # Extract data from PDF
-                    extracted_data = extract_invoice_data(file_path, vendor=vendor)
-                    invoice_data.update(extracted_data)
-
-                    # Save to spreadsheet
-                    sheets_service.spreadsheets().values().append(
-                        spreadsheetId=settings.SHEET_ID,
-                        range="Sheet1!A:C",
-                        valueInputOption="USER_ENTERED",
-                        body={
-                            'values': [[
-                                invoice_data.get("invoice_number", ""),
-                                invoice_data.get("date", ""),
-                                invoice_data.get("total_amount", "")
-                            ]]
-                        }
-                    ).execute()
-
-                    # Create or update ProcessedEmail record
-                    ProcessedEmail.objects.update_or_create(
-                        email_id=email_id,
-                        defaults={
-                            'status': 'processed',
-                            'processed': datetime.now(),
-                            'data': invoice_data
-                        }
-                    )
-
+                    tables = extractor.extract_tables()
+                    text = extractor.extract_text()
+                    print(f"Extracted text length: {len(text) if text else 0}")  # Debug print
+                    invoice_data['tables'] = tables
+                    invoice_data['text'] = text
                 except Exception as e:
-                    errors.append(f"Error processing attachment {original_filename}: {str(e)}")
-                    # Create or update ProcessedEmail record with error status
-                    ProcessedEmail.objects.update_or_create(
-                        email_id=email_id,
-                        defaults={
-                            'status': 'error',
-                            'processed': datetime.now(),
-                            'data': {'error': str(e), 'attachments': attachments}
-                        }
-                    )
+                    print(f"Error during extraction: {str(e)}")  # Debug print
+                    errors.append(f"Error extracting data: {str(e)}")
+
+                # If vendor rules exist, also extract data using those rules
+                if vendor and vendor.data_rules.exists():
+                    extracted_data = extractor.extract_data(vendor.data_rules.all())
+                    invoice_data['vendor_extracted_data'] = extracted_data
+
+                # Create or update ProcessedEmail record
+                ProcessedEmail.objects.update_or_create(
+                    email_id=email_id,
+                    defaults={
+                        'status': 'processed',
+                        'processed': datetime.now(),
+                        'data': invoice_data
+                    }
+                )
 
             except Exception as e:
                 errors.append(f"Error downloading attachment {part.get('filename')}: {str(e)}")
@@ -223,7 +260,7 @@ def process_invoice_email(request):
     return Response({
         'status': 'processed' if not errors else 'partial',
         'invoice': invoice_data,
-        'vendor_name': vendor_name,
+        'vendor': VendorSerializer(vendor).data if vendor else None,
         'errors': errors
     })
 
@@ -299,100 +336,6 @@ def cleanup_attachment(request):
     return Response({'error': 'File not found'}, status=404)
 
 
-# @api_view(['POST'])
-# def test_data_rule(request):
-#     """
-#     Test a single DataRule against a PDF file.
-#     Expected request data:
-#     {
-#         "pdf_filename": "filename.pdf",  # Name of file that exists in /media folder
-#         "data_rule": {
-#             "field_name": "invoice_number",
-#             "data_type": "text",
-#             "location_type": "regex",
-#             "regex_pattern": "Invoice\s*#?\s*([A-Z0-9-]+)",
-#             "pre_processing": {"remove_spaces": true},
-#             "post_processing": {"to_uppercase": true}
-#         }
-#     }
-#     """
-#     try:
-#         # Get the PDF filename from the request
-#         pdf_filename = request.data.get('pdf_filename')
-#         if not pdf_filename:
-#             return Response({'error': 'No PDF filename provided'}, status=400)
-
-#         # Get the data rule from the request
-#         data_rule_json = request.data.get('rule')
-#         if not data_rule_json:
-#             return Response({'error': 'No data rule provided'}, status=400)
-
-#         # Construct the full path to the file in the media folder
-#         media_dir = settings.MEDIA_ROOT
-#         file_path = os.path.join(media_dir, pdf_filename)
-
-#         # Check if the file exists
-#         if not os.path.exists(file_path):
-#             return Response({'error': f'File {pdf_filename} not found in media folder'}, status=404)
-
-#         # Create a temporary DataRule object
-#         temp_rule = DataRule(
-#             field_name=data_rule_json.get('field_name'),
-#             data_type=data_rule_json.get('data_type'),
-#             location_type=data_rule_json.get('location_type'),
-#             coordinates=data_rule_json.get('coordinates'),
-#             keyword=data_rule_json.get('keyword'),
-#             regex_pattern=data_rule_json.get('regex_pattern'),
-#             table_config=data_rule_json.get('table_config'),
-#             pre_processing=data_rule_json.get('pre_processing'),
-#             post_processing=data_rule_json.get('post_processing')
-#         )
-
-#         # Initialize the DataExtractor
-#         extractor = DataExtractor(file_path, debug=True)
-
-#         # Extract data using the rule
-#         result = None
-#         for page in extractor.pdf.pages:
-#             if temp_rule.data_type == 'line_items':
-#                 result = extractor.extract_line_items(page, temp_rule)
-#             else:
-#                 # Use the appropriate extraction method based on location type
-#                 if temp_rule.location_type == 'coordinates':
-#                     result = extractor._extract_by_coordinates(page, temp_rule)
-#                 elif temp_rule.location_type == 'keyword':
-#                     result = extractor._extract_by_keyword(page, temp_rule)
-#                 elif temp_rule.location_type == 'regex':
-#                     result = extractor._extract_by_regex(page, temp_rule)
-#                 elif temp_rule.location_type == 'table':
-#                     result = extractor._extract_by_table(page, temp_rule)
-#                 elif temp_rule.location_type == 'header':
-#                     # For header type, we can use the table method with specific config
-#                     result = extractor._extract_by_table(page, temp_rule)
-
-#                 if result:
-#                     result = extractor._pre_process_text(result, temp_rule.pre_processing)
-#                     result = extractor._post_process_text(result, temp_rule.data_type, temp_rule.post_processing)
-#             if result:
-#                 break
-
-#         return Response({
-#             'success': True,
-#             'result': result,
-#             'rule_applied': {
-#                 'field_name': temp_rule.field_name,
-#                 'data_type': temp_rule.data_type,
-#                 'location_type': temp_rule.location_type
-#             }
-#         })
-
-#     except Exception as e:
-#         return Response({
-#             'success': False,
-#             'error': str(e)
-#         }, status=500)
-
-
 class DataRuleViewSet(viewsets.ModelViewSet):
     """
     A ViewSet for viewing and editing data rules.
@@ -400,24 +343,13 @@ class DataRuleViewSet(viewsets.ModelViewSet):
     queryset = DataRule.objects.all()
     serializer_class = DataRuleSerializer
 
-    # def get_queryset(self):
-    #     """
-    #     Optionally filter by vendor_id
-    #     """
-    #     queryset = DataRule.objects.all()
-    #     vendor_id = self.request.query_params.get('vendor_id', None)
-    #     if vendor_id is not None:
-    #         queryset = queryset.filter(vendor_id=vendor_id)
-    #     return queryset
-
-
     @action(detail=False, methods=['post'])
     def bulk_create(self, request):
         """
         Bulk create or update data rules for a vendor.
         Expected request data:
         {
-            "vendor_name": "Vendor Name",
+            "vendor_id": 1,
             "rules": [
                 {
                     "field_name": "invoice_number",
@@ -430,35 +362,42 @@ class DataRuleViewSet(viewsets.ModelViewSet):
         """
         try:
             data = request.data
-            vendor_name = data.get('vendor_name')
+            vendor_id = data.get('vendor_id')
             rules = data.get('rules', [])
 
-            if not vendor_name:
+            if not vendor_id:
                 return Response(
-                    {'error': 'vendor_name is required'},
+                    {'error': 'vendor_id is required'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
             # Get or create vendor
-            vendor, created = Vendor.objects.get_or_create(name=vendor_name)
+            vendor, created = Vendor.objects.get_or_create(
+                id=vendor_id,
+                defaults={'name': f'Vendor {vendor_id}', 'invoice_type': 'pdf'}
+            )
 
-            import pdb; pdb.set_trace()
-
-            # Delete existing rules for this vendor
-            DataRule.objects.filter(vendor=vendor).delete()
-
-            # Create new rules
             created_rules = []
+
+            # Update or create rules
             for rule_data in rules:
-                # Set the vendor ID before validation
-                rule_data['vendor'] = vendor.id
-                serializer = self.get_serializer(data=rule_data)
+                rule_data['vendor_id'] = vendor.id
+                field_name = rule_data.get('field_name')
+
+                try:
+                    # Try to get existing rule
+                    existing_rule = DataRule.objects.get(vendor=vendor, field_name=field_name)
+                    serializer = self.get_serializer(existing_rule, data=rule_data)
+                except DataRule.DoesNotExist:
+                    # Create new rule if it doesn't exist
+                    serializer = self.get_serializer(data=rule_data)
+
                 serializer.is_valid(raise_exception=True)
                 rule = serializer.save()
                 created_rules.append(rule)
 
             return Response({
-                'message': f'Successfully created {len(created_rules)} rules',
+                'message': f'Successfully processed {len(created_rules)} rules',
                 'rules': self.get_serializer(created_rules, many=True).data
             })
 
@@ -484,13 +423,17 @@ class DataRuleViewSet(viewsets.ModelViewSet):
         }
         """
         try:
-
             # Get the data rule from the request
             data_rule_json = request.data.get('rule')
             if not data_rule_json:
                 return Response({'error': 'No data rule provided'}, status=400)
+
+            # Check if this is a header-only detection request
+            detect_only_header = data_rule_json.get('detect_only_header', False)
+
             rule = DataRule(
                 field_name=data_rule_json.get('field_name'),
+                bbox=data_rule_json.get('bbox'),
                 data_type=data_rule_json.get('data_type'),
                 location_type=data_rule_json.get('location_type'),
                 coordinates=data_rule_json.get('coordinates'),
@@ -527,7 +470,23 @@ class DataRuleViewSet(viewsets.ModelViewSet):
             result = None
             for page in extractor.pdf.pages:
                 if rule.data_type == 'line_items':
-                    result = extractor.extract_line_items(page, rule)
+                    if detect_only_header:
+                        # Only detect header row
+                        tables = page.extract_tables()
+                        for table in tables:
+                            header_keyword = rule.table_config.get('header_text', 'code').lower()
+                            for idx, row in enumerate(table):
+                                if row and any(cell and header_keyword in str(cell).lower() for cell in row):
+                                    result = {
+                                        'header_row': row,
+                                        'items': []  # Empty items since we only want header
+                                    }
+                                    break
+                            if result:
+                                break
+                    else:
+                        # Full table extraction
+                        result = extractor.extract_line_items(page, rule)
                 else:
                     # Use the appropriate extraction method based on location type
                     if rule.location_type == 'coordinates':

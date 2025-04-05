@@ -42,16 +42,7 @@ class DataRule(models.Model):
     regex_pattern = models.CharField(max_length=255, null=True, blank=True, help_text="Regular expression pattern")
     table_config = models.JSONField(null=True, blank=True,
         help_text="For table-based extraction: {'start_row_after_header': int, 'item_columns': key/value pairs, 'header_text': str}",
-        default={
-            "header_text": "Description",
-            "item_columns": {
-                "id": 0,
-                "description": 1,
-                "quantity": 2,
-                "unit_price": 3,
-            },
-            "start_row_after_header": 1
-        }
+        default=dict
     )
 
     # Validation rules
@@ -69,6 +60,8 @@ class DataRule(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    bbox = models.JSONField(null=True, blank=True, help_text="Bounding box for the rule")
+
     def __str__(self):
         return f"{self.vendor.name} - {self.field_name}"
 
@@ -79,6 +72,7 @@ class DataRule(models.Model):
 class Vendor(models.Model):
     name = models.CharField(max_length=255)
     invoice_type = models.CharField(max_length=255, choices=INVOICE_TYPE_CHOICES)
+    spreadsheet_column_mapping = models.JSONField(null=True, blank=True, help_text="Column mapping for spreadsheet: {'invoice_number': 'A', 'date': 'B', 'total_amount': 'C'}")
 
     def __str__(self):
         return self.name

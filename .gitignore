@@ -6,3 +6,5 @@
 **/admin/**
 **/media/**
 **/staticfiles/**
+
+invoiceinator/db.sqlite3
