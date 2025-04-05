@@ -2,8 +2,8 @@
 import { ref, onMounted, watch, computed } from 'vue'
 import VuePdfEmbed from 'vue-pdf-embed'
 import { FontAwesomeIcon } from '@fortawesome/vue-fontawesome'
-import { Tooltip } from 'bootstrap'
 import { deepClone } from '../utils/objectUtils'
+import { fetchAPI, postAPI, patchAPI } from '../utils/api'
 
 
 const defaultRule = {
@@ -246,15 +246,16 @@ async function loadEmails(pageToken = null) {
 
   loading.value = true
   try {
-    const url = new URL('http://localhost:8000/api/emails/')
+    const params = new URLSearchParams()
     if (pageToken) {
-      url.searchParams.append('pageToken', pageToken)
+      params.append('pageToken', pageToken)
     }
-    url.searchParams.append('maxResults', maxResults.value)
-    const res = await fetch(url, {
+    params.append('maxResults', maxResults.value)
+
+    const data = await fetchAPI(`/api/emails/?${params.toString()}`, {
       signal: abortController.value.signal
     })
-    const data = await res.json()
+
     // Add status property to each email object
     data.emails = data.emails.map(email => ({
       ...email,
@@ -284,47 +285,30 @@ async function loadEmails(pageToken = null) {
 
 async function fetchVendors() {
   try {
-    const res = await fetch('http://localhost:8000/api/vendors/')
-    var data = await res.json()
+    const data = await fetchAPI('/api/vendors/')
     // Add label and value props for v-select component
-    data = data.map(vendor => ({
+    vendors.value = data.map(vendor => ({
       ...vendor,
       label: vendor.name,
       value: vendor.id
-    }))
-    vendors.value = data || []
+    })) || []
   } catch (error) {
     console.error('Error fetching vendors:', error)
   }
 }
 
 async function processEmail(email_id) {
-
   const email = emails.value.find(e => e.id === email_id)
   email.busy = true
   let errorMessage = null
 
-  // const email = emails.value.find(e => e.id === email_id)
-  // if (email.status === 'error') {
-  //   alert('This email has an error status and cannot be processed. Please check the email details.')
-  //   return
-  // }
-
   try {
-    const res = await fetch('http://localhost:8000/api/process-email/', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ email_id })
-    })
+    const data = await postAPI('/api/process-email/', { email_id })
 
-    const data = await res.json()
     if (data.status === 'error') {
       email.status = 'error'
       email.busy = false
       errorMessage = data.message
-      // throw new Error(errorMessage)
     }
 
     // Update the email in the list with new data
@@ -363,35 +347,15 @@ async function saveDataRules() {
 
   try {
     // First save the data rules
-    const res = await fetch('http://localhost:8000/api/data-rules/bulk_create/', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        vendor_id: activeVendor.value.id,
-        rules: dataRules.value
-      })
+    await postAPI('/api/data-rules/bulk_create/', {
+      vendor_id: activeVendor.value.id,
+      rules: dataRules.value
     })
-
-    if (!res.ok) {
-      throw new Error(`HTTP error! status: ${res.status}`)
-    }
 
     // Then save the column mappings
-    const vendorRes = await fetch(`http://localhost:8000/api/vendors/${activeVendor.value.id}/`, {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        spreadsheet_column_mapping: columnMappings.value
-      })
+    await patchAPI(`/api/vendors/${activeVendor.value.id}/`, {
+      spreadsheet_column_mapping: columnMappings.value
     })
-
-    if (!vendorRes.ok) {
-      throw new Error(`HTTP error! status: ${vendorRes.status}`)
-    }
 
     // Update the vendor in the vendors list with new mappings
     const vendorIndex = vendors.value.findIndex(v => v.id === activeVendor.value.id);
@@ -607,510 +571,555 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="container mt-4">
-    <h2>Invoice Emails</h2>
-
-    <div class="row justify-content-end mb-3">
-      <div class="col-auto">
-        <div class="input-group">
-          <span class="input-group-text">Max Results</span>
-          <input type="number" class="form-control" v-model="maxResults" min="1" max="100">
-          <button class="btn btn-primary" @click="loadEmails()" :disabled="loading">
-            <span v-if="loading" class="spinner-border spinner-border-sm me-1"></span>
-            {{ loading ? 'Loading...' : 'Reload' }}
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <div class="list-group">
-      <div v-for="email in emails"
-        :key="email.id"
-        :class="{
-          'list-group-item list-group-item-action row mx-0': true,
-          'list-group-item-danger': email.status === 'error',
-          'list-group-item-success': email.status === 'processed',
-          'list-group-item-warning': !email.status || email.status === 'pending'
-        }"
-        @click="processEmail(email.id)"
-      >
-        <div class="col-12 header">
-          {{ email.snippet }}
-          <!-- <div class="col-auto">
-            <button class="btn btn-outline-primary btn-sm"
-                    @click="downloadAttachments(email.id, $event)">
-              <font-awesome-icon icon="paperclip" class="me-1" />
-              {{ email.attachment_count }} attachments
-            </button>
-          </div> -->
-        </div>
-        <div class="mt-2 row col-12 justify-content-between text-muted footer">
-          <div class="col-auto">From: {{ email.from }}</div>
-          <div class="col-auto">Vendor: {{ email.vendor_name || 'N/A' }}</div>
-          <div class="col-auto">Status: {{ email.status || 'pending' }}</div>
-          <div class="col-auto">Date: {{ email.date }}</div>
-        </div>
-        <div v-if="email.busy" class="col-12">
-          <div class="d-flex justify-content-center">
-            <div class="spinner-border spinner-border-sm text-primary" role="status">
-              <span class="visually-hidden">Loading...</span>
-            </div>
+  <q-card>
+    <div class="q-pa-md">
+      <h2>Invoice Emails</h2>
+      <div class="row justify-end q-mb-md">
+        <div class="col-auto">
+          <div class="row items-center">
+            <span class="q-mr-sm">Max Results</span>
+            <q-input
+              type="number"
+              v-model="maxResults"
+              min="1"
+              max="100"
+              dense
+              outlined
+              class="q-mr-sm"
+              style="width: 100px"
+            />
+            <q-btn
+              color="primary"
+              @click="loadEmails()"
+              :loading="loading"
+              :disable="loading"
+            >
+              {{ loading ? 'Loading...' : 'Reload' }}
+            </q-btn>
           </div>
         </div>
       </div>
+      <q-list bordered separator>
+        <q-item
+          v-for="email in emails"
+          :key="email.id"
+          clickable
+          v-ripple
+          :class="{
+            'bg-negative': email.status === 'error',
+            'bg-positive': email.status === 'processed',
+            'bg-warning': !email.status || email.status === 'pending'
+          }"
+          @click="processEmail(email.id)"
+        >
+          <q-item-section>
+            <q-item-label>{{ email.snippet }}</q-item-label>
+            <q-item-label caption>
+              <div class="row justify-between text-grey-7">
+                <div>From: {{ email.from }}</div>
+                <div>Vendor: {{ email.vendor_name || 'N/A' }}</div>
+                <div>Status: {{ email.status || 'pending' }}</div>
+                <div>Date: {{ email.date }}</div>
+              </div>
+            </q-item-label>
+          </q-item-section>
+          <q-item-section side v-if="email.busy">
+            <q-spinner color="primary" size="sm" />
+          </q-item-section>
+        </q-item>
+      </q-list>
+      <div v-if="nextPageToken" class="text-center q-mt-md">
+        <q-btn
+          color="primary"
+          @click="loadMore"
+          :loading="loading"
+          :disable="loading"
+        >
+          Load More
+        </q-btn>
+      </div>
     </div>
+  </q-card>
 
-    <div v-if="nextPageToken" class="text-center mt-3">
-      <button @click="loadMore"
-              class="btn btn-primary"
-              :disabled="loading">
-        Load More
-      </button>
-    </div>
+  <!-- Processing Dialog -->
+  <q-dialog v-model="showProcessingModal" full-width>
+    <q-card>
+      <q-card-section class="row items-center q-pb-none">
+        <div class="text-h6">Processing Invoice</div>
+        <q-space />
+        <q-btn icon="close" flat round dense v-close-popup />
+      </q-card-section>
 
+      <q-card-section>
+        <div class="row">
+          <!-- Left side: PDF iframe -->
+          <div class="col-12 col-md-8">
+            <q-card>
+              <q-card-section>
+                <div class="text-h6">Invoice Preview</div>
+              </q-card-section>
 
-    <!-- Processing Modal -->
-    <div v-if="showProcessingModal" id="processing-modal" class="modal show d-block" tabindex="-1">
-      <div class="modal-dialog modal-xl">
-        <div class="modal-content">
-          <div class="modal-header">
-            <h5 class="modal-title">Processing Invoice</h5>
-
-            <button type="button" class="btn-close" @click="showProcessingModal = false"></button>
-          </div>
-          <div class="modal-body">
-            <div class="row">
-
-              <!-- Left side: PDF iframe -->
-              <div class="col-12 col-md-8">
-                <div class="card">
-                  <div class="card-header">
-                    <div class="row">
-                      <div class="col">
-                        <h6 class="mb-0">Invoice Preview</h6>
-                      </div>
+              <q-card-section class="q-pa-none" style="height: 600px;">
+                <div v-if="currentInvoice?.attachments?.length" class="attachments-container">
+                  <div v-for="(attachment, index) in currentInvoice.attachments"
+                       :key="index"
+                       class="attachment-frame">
+                    <div class="attachment-header">
+                      <h6 class="q-ma-none">
+                        <a :href="attachment.url" target="_blank">{{ attachment.filename }}</a>
+                      </h6>
                     </div>
-                  </div>
-
-                  <div class="card-body p-0" style="height: 600px;">
-                    <div v-if="currentInvoice?.attachments?.length" class="attachments-container">
-                      <div v-for="(attachment, index) in currentInvoice.attachments"
-                           :key="index"
-                           class="attachment-frame">
-                        <div class="attachment-header">
-                          <h6 class="mb-0"><a :href="attachment.url" target="_blank">{{ attachment.filename }}</a></h6>
-                        </div>
-                        <div class="pdf-container" ref="pdfContainer"
-                             @mousedown="startDrawing"
-                             @mousemove="updateDrawing"
-                             @mouseup="stopDrawing"
-                             @mouseleave="stopDrawing">
-                          <VuePdfEmbed
-                            :source="attachment.url"
-                            :page="1"
-                            @error="onPdfError"
-                            @loading="onPdfLoading"
-                            @loaded="onPdfLoaded"
-                          ></VuePdfEmbed>
-                          <div v-if="drawingEnabled" class="drawing-overlay">
-                            <div v-if="isDrawing" class="bounding-box active" :style="selectionBox"></div>
-                            <div v-if="currentBoundingBox && !isDrawing"
-                                 class="bounding-box active"
-                                 :style="currentBoundingBox">
-                              <span v-if="currentBoundingBox.ruleName" class="rule-label">{{ currentBoundingBox.ruleName }}</span>
-                            </div>
-                          </div>
-                          <pre>{{ pdfText }}</pre>
-                          <div v-if="pdfLoading" class="pdf-loading">
-                            <div class="spinner-border text-primary" role="status">
-                              <span class="visually-hidden">Loading PDF...</span>
-                            </div>
-                          </div>
-                          <div v-if="pdfError" class="pdf-error text-danger">
-                            Error loading PDF: {{ pdfError }}
-                          </div>
+                    <div class="pdf-container" ref="pdfContainer"
+                         @mousedown="startDrawing"
+                         @mousemove="updateDrawing"
+                         @mouseup="stopDrawing"
+                         @mouseleave="stopDrawing">
+                      <VuePdfEmbed
+                        :source="attachment.url"
+                        :page="1"
+                        @error="onPdfError"
+                        @loading="onPdfLoading"
+                        @loaded="onPdfLoaded"
+                      />
+                      <div v-if="drawingEnabled" class="drawing-overlay">
+                        <div v-if="isDrawing" class="bounding-box active" :style="selectionBox"></div>
+                        <div v-if="currentBoundingBox && !isDrawing"
+                             class="bounding-box active"
+                             :style="currentBoundingBox">
+                          <span v-if="currentBoundingBox.ruleName" class="rule-label">{{ currentBoundingBox.ruleName }}</span>
                         </div>
                       </div>
-                    </div>
-                    <div v-else class="p-3 text-center">
-                      No preview available
+                      <pre>{{ pdfText }}</pre>
+                      <div v-if="pdfLoading" class="pdf-loading">
+                        <q-spinner color="primary" size="3em" />
+                      </div>
+                      <div v-if="pdfError" class="pdf-error text-negative">
+                        Error loading PDF: {{ pdfError }}
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-
-              <!-- Right side: Form controls -->
-              <div class="col-12 col-md-4">
-                <div class="card">
-                  <div class="card-header">
-                    <h6 class="mb-0">Data Rules</h6>
-                  </div>
-                  <div class="card-body data-rules-card">
-                    <div class="accordion" id="dataRulesAccordion">
-                      <!-- Add New Data Rule Accordion Item -->
-                      <div class="accordion-item">
-                        <h2 class="accordion-header">
-                          <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#addNewRuleCollapse">
-                            Add New Data Rule
-                          </button>
-                        </h2>
-
-                        <!-- DataRule editor -->
-                        <div id="addNewRuleCollapse" class="accordion-collapse collapse show" data-bs-parent="#dataRulesAccordion">
-                          <div class="accordion-body">
-                            <form @submit.prevent="addDataRule" class="mb-3">
-                              <div class="row no-gutters px-2">
-                                <div class="col-md-6 px-1">
-                                  <label class="form-label small">Field Name</label>
-                                  <input type="text" class="form-control form-control-sm" v-model="newRule.field_name" required>
-                                </div>
-                                <div class="col-md-3 px-1">
-                                  <label class="form-label small">Data Type</label>
-                                  <select class="form-select form-select-sm" v-model="newRule.data_type" required>
-                                    <option value="text">Text</option>
-                                    <option value="number">Number</option>
-                                    <option value="date">Date</option>
-                                    <option value="currency">Currency</option>
-                                    <option value="email">Email</option>
-                                    <option value="phone">Phone</option>
-                                    <option value="line_items">Line Items</option>
-                                  </select>
-                                </div>
-                                <div class="col-md-3 px-1">
-                                  <label class="form-label small">Locator</label>
-                                  <select class="form-select form-select-sm" v-model="newRule.location_type" required>
-                                    <option value="keyword">Keyword</option>
-                                    <option value="regex">Regular Expression</option>
-                                    <option value="table">Table</option>
-                                    <option value="header">Header</option>
-                                  </select>
-                                </div>
-                              </div>
-
-                              <!-- Drawing mode toggle button -->
-                              <div class="row mt-2">
-                                <div class="col-12">
-                                  <button
-                                    type="button"
-                                    class="btn w-100 btn-sm"
-                                    :class="drawingEnabled ? 'btn-success' : 'btn-outline-primary'"
-                                    @click="drawingEnabled = !drawingEnabled"
-                                  >
-                                    <font-awesome-icon :icon="drawingEnabled ? 'crosshairs' : 'draw-polygon'" class="me-2" />
-                                    {{ drawingEnabled ? 'Drawing Mode Active - Click to Disable' : 'Enable Drawing Mode' }}
-                                  </button>
-                                </div>
-                              </div>
-
-                              <!-- Add coordinates section for all rules -->
-                              <div v-if="drawingEnabled" class="row no-gutters mt-2 px-2">
-                                <div class="col-3 px-1">
-                                  <label class="form-label small">X Position</label>
-                                  <input type="number" class="form-control form-control-sm" v-model="newRule.bbox.x" placeholder="X" step="0.01">
-                                </div>
-                                <div class="col-3 px-1">
-                                  <label class="form-label small">Y Position</label>
-                                  <input type="number" class="form-control form-control-sm" v-model="newRule.bbox.y" placeholder="Y" step="0.01">
-                                </div>
-                                <div class="col-3 px-1">
-                                  <label class="form-label small">Width</label>
-                                  <input type="number" class="form-control form-control-sm" v-model="newRule.bbox.width" placeholder="Width" step="0.01">
-                                </div>
-                                <div class="col-3 px-1">
-                                  <label class="form-label small">Height</label>
-                                  <input type="number" class="form-control form-control-sm" v-model="newRule.bbox.height" placeholder="Height" step="0.01">
-                                </div>
-                              </div>
-
-                              <!-- Add other rule-specific sections -->
-                              <div class="row mt-2" v-if="newRule.location_type === 'keyword'">
-                                <div class="col-12">
-                                  <label class="form-label small">Keyword</label>
-                                  <input type="text" class="form-control form-control-sm" v-model="newRule.keyword" placeholder="Enter keyword">
-                                </div>
-                              </div>
-
-                              <div class="row mt-2" v-if="newRule.location_type === 'regex'">
-                                <div class="col-12">
-                                  <label class="form-label small">Regular Expression Pattern</label>
-                                  <input type="text" class="form-control form-control-sm" v-model="newRule.regex_pattern" placeholder="Enter regex pattern">
-                                </div>
-                              </div>
-
-                              <div class="row mt-2" v-if="newRule.location_type === 'table'">
-                                <div class="col-12 mb-2">
-                                  <label class="form-label small">Header Text</label>
-                                  <input type="text" class="form-control form-control-sm" v-model="newRule.table_config.header_text" placeholder="Header Text">
-                                </div>
-                                <div class="col-12 mb-2">
-                                  <label class="form-label small">Start Row After Header</label>
-                                  <input type="number" class="form-control form-control-sm" v-model="newRule.table_config.start_row_after_header" placeholder="Start Row">
-                                </div>
-                                <div class="col-12 mb-2">
-                                  <button type="button" class="btn btn-outline-primary btn-sm" @click="detectTableColumns(newRule)">
-                                    <span v-if="!newRule.table_config?.detected_columns">Detect Columns</span>
-                                    <span v-else>Re-detect Columns</span>
-                                  </button>
-                                </div>
-                                <div v-if="newRule.table_config?.detected_columns" class="col-12">
-                                  <label class="form-label small">Map Detected Columns</label>
-                                  <div class="table-responsive">
-                                    <table class="table table-sm">
-                                      <thead>
-                                        <tr>
-                                          <th>Column Name</th>
-                                          <th>Map To</th>
-                                          <th>Index</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        <tr v-for="(colName, index) in newRule.table_config.detected_columns" :key="colName">
-                                          <td>{{ colName }}</td>
-                                          <td>
-                                            <select class="form-select form-select-sm"
-                                              :value="newRule.table_config.item_columns[colName]"
-                                              @change="e => handleTableColumnMapping(colName, e)">
-                                              <option value="">Not Used</option>
-                                              <option value="id">ID</option>
-                                              <option value="description">Description</option>
-                                              <option value="quantity">Quantity</option>
-                                              <option value="unit_price">Unit Price</option>
-                                              <option value="total_amount">Total Amount</option>
-                                            </select>
-                                          </td>
-                                          <td>{{ index }}</td>
-                                        </tr>
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                </div>
-                              </div>
-
-                              <!-- <div class="row mt-2">
-                                <div class="col-12">
-                                  <div class="form-check form-check-inline">
-                                    <input type="checkbox" class="form-check-input" v-model="newRule.required">
-                                    <label class="form-check-label small">Required Field</label>
-                                  </div>
-                                </div>
-                              </div> -->
-
-                              <div class="row mt-2">
-                                <div class="col-12">
-                                  <button type="button" class="btn btn-outline-danger btn-sm" @click="testDataRule(newRule)">Test Rule</button>
-                                  <button type="submit" class="btn btn-primary btn-sm">Add Rule</button>
-                                </div>
-                              </div>
-
-
-                            </form>
-                          </div>
-                        </div>
-                      </div>
-
-                      <!-- Existing Rules Accordion Item -->
-                      <div class="accordion-item">
-                        <h2 class="accordion-header">
-                          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#existingRulesCollapse">
-                            <div class="w-100">
-                              Existing Rules
-                              <span v-if="dataRules.length > 0" class="badge bg-primary mx-2 float-end">{{ dataRules.length }}</span>
-                            </div>
-                          </button>
-                        </h2>
-
-                        <div id="existingRulesCollapse" class="accordion-collapse collapse" data-bs-parent="#dataRulesAccordion">
-                          <div class="accordion-body">
-                            <div class="table-responsive">
-                              <table class="table table-sm table-hover">
-                                <thead>
-                                  <tr>
-                                    <th>Field Name</th>
-                                    <th>Type</th>
-                                    <th>Location</th>
-                                    <th>Required</th>
-                                    <th class="text-end">Actions</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  <tr v-for="(rule, index) in dataRules" :key="index">
-                                    <td>{{ rule.field_name }}</td>
-                                    <td><span class="badge bg-secondary">{{ rule.data_type }}</span></td>
-                                    <td><span class="badge bg-info">{{ rule.location_type }}</span></td>
-                                    <td>
-                                      <font-awesome-icon :icon="rule.required ? 'check-circle' : 'times-circle'"
-                                        :class="rule.required ? 'text-success' : 'text-danger'" />
-                                    </td>
-                                    <td class="text-end">
-                                      <font-awesome-icon
-                                        icon="play"
-                                        class="text-primary mx-1"
-                                        style="cursor: pointer"
-                                        data-bs-toggle="tooltip"
-                                        data-bs-placement="top"
-                                        title="Test this rule"
-                                        @click="testDataRule(rule)"
-                                      ></font-awesome-icon>
-                                      <font-awesome-icon
-                                        icon="edit"
-                                        class="text-secondary mx-1"
-                                        style="cursor: pointer"
-                                        data-bs-toggle="tooltip"
-                                        data-bs-placement="top"
-                                        title="Edit this rule"
-                                        @click="editDataRule(rule)"
-                                      ></font-awesome-icon>
-                                      <font-awesome-icon
-                                        icon="trash"
-                                        class="text-danger mx-1"
-                                        style="cursor: pointer"
-                                        data-bs-toggle="tooltip"
-                                        data-bs-placement="top"
-                                        title="Delete this rule"
-                                        @click="deleteDataRule(index)"
-                                      ></font-awesome-icon>
-                                    </td>
-                                  </tr>
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-
-                      <div class="accordion-item" v-if="dataRules.length > 0">
-                        <h2 class="accordion-header">
-                          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#spreadsheetColumnMappingCollapse">
-                            Spreadsheet Column Mapping
-                          </button>
-                        </h2>
-
-                        <div id="spreadsheetColumnMappingCollapse" class="accordion-collapse collapse" data-bs-parent="#dataRulesAccordion">
-                          <div class="accordion-body">
-                            <div class="table-responsive">
-                              <table class="table table-sm table-hover">
-                                <thead>
-                                  <tr>
-                                    <th>Field Name</th>
-                                    <th>Column</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  <tr v-for="rule in dataRules" :key="rule.field_name">
-                                    <td>{{ rule.field_name }}</td>
-                                    <td>
-                                      <input
-                                        type="text"
-                                        class="form-control form-control-sm"
-                                        :value="columnMappings[rule.field_name]"
-                                        placeholder="A-Z"
-                                        pattern="[A-Za-z]"
-                                        maxlength="1"
-                                        @input="e => handleColumnMapping(rule.field_name, e)"
-                                      >
-                                    </td>
-                                  </tr>
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-
-                    </div>
-                  </div>
+                <div v-else class="text-center q-pa-md">
+                  No preview available
                 </div>
-              </div>
-            </div>
+              </q-card-section>
+            </q-card>
           </div>
-          <div class="modal-footer">
-            <div class="row">
-              <div class="col-auto">
 
-              <button type="button"
-                v-if="tableData && tableData.length > 0"
-                class="btn btn-link"
-                @click="showDataModal('Table Data')"
-              >
-                Show Table Data
-              </button>
-              <button type="button"
-                v-if="textData && textData.length > 0"
-                class="btn btn-link"
-                @click="showDataModal('Text Data')"
-              >
-                Show Text Data
-              </button>
+          <!-- Right side: Form controls -->
+          <div class="col-12 col-md-4">
+            <q-card style="height: 100% ;">
+              <q-card-section>
+                <div class="text-h6">Data Rules</div>
+              </q-card-section>
+              <q-card-section class="data-rules-card">
+                <q-expansion-item
+                  group="dataRules"
+                  icon="add"
+                  label="Add New Data Rule"
+                  default-opened
+                >
+                  <q-card>
+                    <q-card-section>
+                      <form @submit.prevent="addDataRule" class="q-gutter-md">
+                        <div class="row q-col-gutter-sm">
+                          <div class="col-md-6">
+                            <q-input
+                              v-model="newRule.field_name"
+                              label="Field Name"
+                              dense
+                              outlined
+                              required
+                            />
+                          </div>
+                          <div class="col-md-3">
+                            <q-select
+                              v-model="newRule.data_type"
+                              :options="['text', 'number', 'date', 'currency', 'email', 'phone', 'line_items']"
+                              label="Data Type"
+                              dense
+                              outlined
+                              required
+                            />
+                          </div>
+                          <div class="col-md-3">
+                            <q-select
+                              v-model="newRule.location_type"
+                              :options="['keyword', 'regex', 'table', 'header']"
+                              label="Locator"
+                              dense
+                              outlined
+                              required
+                            />
+                          </div>
+                        </div>
 
-              <!-- Shared Modal -->
-              <div
-                v-if="_showDataModal"
-                class="modal fade show d-block"
-                tabindex="-1"
-                role="dialog"
-              >
-                <div class="modal-dialog modal-xl modal-dialog-scrollable">
-                  <div class="modal-content">
-                    <div class="modal-header">
-                      <h5 class="modal-title">{{ modalTitle }}</h5>
-                      <button type="button" class="btn-close" @click="closeDataModal"></button>
-                    </div>
-                    <div class="modal-body">
-                      <div class="table-responsive">
-                        <code class="d-block">
-                          <pre class="mb-0">
-                            {{ displayData }}
-                          </pre>
-                        </code>
-                      </div>
-                    </div>
-                    <div class="modal-footer">
-                      <button
-                        type="button"
-                        class="btn btn-secondary"
-                        @click="closeDataModal"
+                        <q-btn
+                          :color="drawingEnabled ? 'positive' : 'primary'"
+                          class="full-width"
+                          :icon="drawingEnabled ? 'crosshairs' : 'draw-polygon'"
+                          :label="drawingEnabled ? 'Drawing Mode Active - Click to Disable' : 'Enable Drawing Mode'"
+                          @click="drawingEnabled = !drawingEnabled"
+                        />
+
+                        <div v-if="drawingEnabled" class="row q-col-gutter-sm">
+                          <div class="col-3">
+                            <q-input
+                              v-model="newRule.bbox.x"
+                              label="X Position"
+                              type="number"
+                              dense
+                              outlined
+                              step="0.01"
+                            />
+                          </div>
+                          <div class="col-3">
+                            <q-input
+                              v-model="newRule.bbox.y"
+                              label="Y Position"
+                              type="number"
+                              dense
+                              outlined
+                              step="0.01"
+                            />
+                          </div>
+                          <div class="col-3">
+                            <q-input
+                              v-model="newRule.bbox.width"
+                              label="Width"
+                              type="number"
+                              dense
+                              outlined
+                              step="0.01"
+                            />
+                          </div>
+                          <div class="col-3">
+                            <q-input
+                              v-model="newRule.bbox.height"
+                              label="Height"
+                              type="number"
+                              dense
+                              outlined
+                              step="0.01"
+                            />
+                          </div>
+                        </div>
+
+                        <div v-if="newRule.location_type === 'keyword'" class="q-mt-sm">
+                          <q-input
+                            v-model="newRule.keyword"
+                            label="Keyword"
+                            dense
+                            outlined
+                          />
+                        </div>
+
+                        <div v-if="newRule.location_type === 'regex'" class="q-mt-sm">
+                          <q-input
+                            v-model="newRule.regex_pattern"
+                            label="Regular Expression Pattern"
+                            dense
+                            outlined
+                          />
+                        </div>
+
+                        <div v-if="newRule.location_type === 'table'" class="q-mt-sm">
+                          <q-input
+                            v-model="newRule.table_config.header_text"
+                            label="Header Text"
+                            dense
+                            outlined
+                          />
+                          <q-input
+                            v-model="newRule.table_config.start_row_after_header"
+                            label="Start Row After Header"
+                            type="number"
+                            dense
+                            outlined
+                            class="q-mt-sm"
+                          />
+                          <q-btn
+                            color="primary"
+                            class="q-mt-sm"
+                            @click="detectTableColumns(newRule)"
+                          >
+                            <span v-if="!newRule.table_config?.detected_columns">Detect Columns</span>
+                            <span v-else>Re-detect Columns</span>
+                          </q-btn>
+
+                          <div v-if="newRule.table_config?.detected_columns" class="q-mt-sm">
+                            <div class="text-subtitle2">Map Detected Columns</div>
+                            <q-table
+                              :rows="newRule.table_config.detected_columns.map((colName, index) => ({
+                                colName,
+                                index,
+                                mapping: newRule.table_config.item_columns[colName] || ''
+                              }))"
+                              :columns="[
+                                { name: 'colName', label: 'Column Name', field: 'colName' },
+                                { name: 'mapping', label: 'Map To', field: 'mapping' },
+                                { name: 'index', label: 'Index', field: 'index' }
+                              ]"
+                              dense
+                              flat
+                              bordered
+                            >
+                              <template v-slot:body="props">
+                                <q-tr :props="props">
+                                  <q-td key="colName" :props="props">
+                                    {{ props.row.colName }}
+                                  </q-td>
+                                  <q-td key="mapping" :props="props">
+                                    <q-select
+                                      v-model="newRule.table_config.item_columns[props.row.colName]"
+                                      :options="['', 'id', 'description', 'quantity', 'unit_price', 'total_amount']"
+                                      dense
+                                      outlined
+                                      @update:model-value="value => handleTableColumnMapping(props.row.colName, { target: { value } })"
+                                    />
+                                  </q-td>
+                                  <q-td key="index" :props="props">
+                                    {{ props.row.index }}
+                                  </q-td>
+                                </q-tr>
+                              </template>
+                            </q-table>
+                          </div>
+                        </div>
+
+                        <div class="row q-mt-md">
+                          <div class="col">
+                            <q-btn
+                              color="negative"
+                              class="q-mr-sm"
+                              @click="testDataRule(newRule)"
+                            >
+                              Test Rule
+                            </q-btn>
+                            <q-btn
+                              type="submit"
+                              color="primary"
+                            >
+                              Add Rule
+                            </q-btn>
+                          </div>
+                        </div>
+                      </form>
+                    </q-card-section>
+                  </q-card>
+                </q-expansion-item>
+
+                <q-expansion-item
+                  group="dataRules"
+                  icon="list"
+                  :label="`Existing Rules (${dataRules.length})`"
+                >
+                  <q-card>
+                    <q-card-section>
+                      <q-table
+                        :rows="dataRules"
+                        :columns="[
+                          { name: 'field_name', label: 'Field Name', field: 'field_name' },
+                          { name: 'data_type', label: 'Type', field: 'data_type' },
+                          { name: 'location_type', label: 'Location', field: 'location_type' },
+                          { name: 'required', label: 'Required', field: 'required' },
+                          { name: 'actions', label: 'Actions', field: 'actions' }
+                        ]"
+                        dense
+                        flat
+                        bordered
                       >
-                        Close
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
+                        <template v-slot:body="props">
+                          <q-tr :props="props">
+                            <q-td key="field_name" :props="props">
+                              {{ props.row.field_name }}
+                            </q-td>
+                            <q-td key="data_type" :props="props">
+                              <q-badge color="secondary">{{ props.row.data_type }}</q-badge>
+                            </q-td>
+                            <q-td key="location_type" :props="props">
+                              <q-badge color="info">{{ props.row.location_type }}</q-badge>
+                            </q-td>
+                            <q-td key="required" :props="props">
+                              <q-icon
+                                :name="props.row.required ? 'check_circle' : 'cancel'"
+                                :color="props.row.required ? 'positive' : 'negative'"
+                              />
+                            </q-td>
+                            <q-td key="actions" :props="props">
+                              <q-btn
+                                flat
+                                round
+                                color="primary"
+                                icon="play_arrow"
+                                @click="testDataRule(props.row)"
+                              >
+                                <q-tooltip>Test this rule</q-tooltip>
+                              </q-btn>
+                              <q-btn
+                                flat
+                                round
+                                color="secondary"
+                                icon="edit"
+                                @click="editDataRule(props.row)"
+                              >
+                                <q-tooltip>Edit this rule</q-tooltip>
+                              </q-btn>
+                              <q-btn
+                                flat
+                                round
+                                color="negative"
+                                icon="delete"
+                                @click="deleteDataRule(props.rowIndex)"
+                              >
+                                <q-tooltip>Delete this rule</q-tooltip>
+                              </q-btn>
+                            </q-td>
+                          </q-tr>
+                        </template>
+                      </q-table>
+                    </q-card-section>
+                  </q-card>
+                </q-expansion-item>
 
-              </div>
-              <div class="col-auto">
-                <div class="d-flex flex-row align-items-center">
-                  <label class="form-label small">Vendor:</label>
-                  <v-select
-                    v-model="vendorID"
-                    :options="vendors"
-                    :is-clearable="false"
-                    placeholder="Select a vendor"
-                    class="form-select-sm"
-                  />
-                </div>
-              </div>
-              <div class="col">
-                <button type="button" class="btn btn-secondary btn-sm" @click="processEmail(currentInvoice.email_id)">
-                  <font-awesome-icon icon="rotate-left" />
-                  Re-process
-                </button>
-                <button type="button" class="btn btn-info btn-sm" @click="saveToGoogleSheet">Save to Google Sheet</button>
-                <button type="button" class="btn btn-primary btn-sm" @click="saveDataRules">Save Invoice Data Rules</button>
-              </div>
-            </div>
+                <q-expansion-item
+                  v-if="dataRules.length > 0"
+                  group="dataRules"
+                  icon="table_chart"
+                  label="Spreadsheet Column Mapping"
+                >
+                  <q-card>
+                    <q-card-section>
+                      <q-table
+                        :rows="dataRules"
+                        :columns="[
+                          { name: 'field_name', label: 'Field Name', field: 'field_name' },
+                          { name: 'column', label: 'Column', field: 'column' }
+                        ]"
+                        dense
+                        flat
+                        bordered
+                      >
+                        <template v-slot:body="props">
+                          <q-tr :props="props">
+                            <q-td key="field_name" :props="props">
+                              {{ props.row.field_name }}
+                            </q-td>
+                            <q-td key="column" :props="props">
+                              <q-input
+                                v-model="columnMappings[props.row.field_name]"
+                                dense
+                                outlined
+                                placeholder="A-Z"
+                                pattern="[A-Za-z]"
+                                maxlength="1"
+                                @update:model-value="value => handleColumnMapping(props.row.field_name, { target: { value } })"
+                              />
+                            </q-td>
+                          </q-tr>
+                        </template>
+                      </q-table>
+                    </q-card-section>
+                  </q-card>
+                </q-expansion-item>
+              </q-card-section>
+            </q-card>
           </div>
         </div>
-      </div>
-    </div>
-    <div v-if="showProcessingModal" class="modal-backdrop show"></div>
-  </div>
+      </q-card-section>
+
+      <q-card-actions>
+        <div class="row full-width justify-between">
+          <div class="col-auto">
+            <q-btn
+              v-if="tableData && tableData.length > 0"
+              flat
+              color="primary"
+              @click="showDataModal('Table Data')"
+            >
+              Show Table Data
+            </q-btn>
+            <q-btn
+              v-if="textData && textData.length > 0"
+              flat
+              color="primary"
+              @click="showDataModal('Text Data')"
+            >
+              Show Text Data
+            </q-btn>
+          </div>
+          <div class="col-auto">
+            <div class="row items-center">
+              <span class="q-mr-sm">Vendor:</span>
+              <q-select
+                v-model="vendorID"
+                :options="vendors"
+                :clearable="false"
+                placeholder="Select a vendor"
+                dense
+                outlined
+                class="q-mr-sm"
+                style="width: 200px"
+              />
+            </div>
+          </div>
+          <div class="col-auto">
+            <q-btn
+              color="secondary"
+              class="q-mr-sm"
+              @click="processEmail(currentInvoice.email_id)"
+            >
+              <q-icon name="rotate_left" class="q-mr-sm" />
+              Re-process
+            </q-btn>
+            <q-btn
+              color="info"
+              class="q-mr-sm"
+              @click="saveToGoogleSheet"
+            >
+              Save to Google Sheet
+            </q-btn>
+            <q-btn
+              color="primary"
+              @click="saveDataRules"
+            >
+              Save Invoice Data Rules
+            </q-btn>
+          </div>
+        </div>
+      </q-card-actions>
+    </q-card>
+  </q-dialog>
+
+  <!-- Data Modal -->
+  <q-dialog v-model="_showDataModal" full-width>
+    <q-card>
+      <q-card-section class="row items-center q-pb-none">
+        <div class="text-h6">{{ modalTitle }}</div>
+        <q-space />
+        <q-btn icon="close" flat round dense v-close-popup />
+      </q-card-section>
+
+      <q-card-section>
+        <div class="scroll">
+          <code class="block">
+            <pre class="q-pa-md bg-grey-2 rounded-borders">
+              {{ displayData }}
+            </pre>
+          </code>
+        </div>
+      </q-card-section>
+
+      <q-card-actions align="right">
+        <q-btn flat label="Close" color="primary" v-close-popup />
+      </q-card-actions>
+    </q-card>
+  </q-dialog>
 </template>
 
-
 <style lang="scss">
+@use 'quasar/src/css/variables.sass' as *;
+
 // Thin scrollbar mixin
 @mixin thin-scrollbar {
   &::-webkit-scrollbar {
@@ -1119,17 +1128,17 @@ onMounted(() => {
   }
 
   &::-webkit-scrollbar-track {
-    background: #f1f1f1;
+    background: $grey-3;
     border-radius: 4px;
   }
 
   &::-webkit-scrollbar-thumb {
-    background: #888;
+    background: $grey-7;
     border-radius: 4px;
   }
 
   &::-webkit-scrollbar-thumb:hover {
-    background: #555;
+    background: $grey-8;
   }
 }
 
@@ -1138,46 +1147,13 @@ onMounted(() => {
   @include thin-scrollbar;
 }
 
-.list-group-item {
+.q-item {
   cursor: pointer;
-}
+  transition: background-color 0.3s ease;
 
-.list-group-item:hover {
-  background-color: #f8f9fa;
-}
-
-.header {
-  font-weight: bold;
-}
-
-.footer {
-  font-size: 0.8rem;
-}
-
-.modal-backdrop {
-  background-color: rgba(0, 0, 0, 0.5);
-}
-
-.modal {
-  background-color: rgba(0, 0, 0, 0.5);
-}
-
-.btn-outline-primary {
-  border-width: 1px;
-  padding: 0.25rem 0.75rem;
-  font-size: 0.875rem;
-}
-
-.modal-xl {
-  max-width: 90%;
-}
-
-.card {
-  height: 100%;
-}
-
-.card-body {
-  overflow-y: auto;
+  &:hover {
+    background-color: $grey-2;
+  }
 }
 
 .attachments-container {
@@ -1188,16 +1164,16 @@ onMounted(() => {
 
 .attachment-frame {
   margin-bottom: 1rem;
-  border: 1px solid #dee2e6;
-  border-radius: 0.25rem;
+  border: 1px solid $grey-4;
+  border-radius: 4px;
   display: flex;
   flex-direction: column;
 }
 
 .attachment-header {
   padding: 0.5rem 1rem;
-  background-color: #f8f9fa;
-  border-bottom: 1px solid #dee2e6;
+  background-color: $grey-2;
+  border-bottom: 1px solid $grey-4;
 }
 
 .attachment-frame iframe {
@@ -1215,20 +1191,12 @@ onMounted(() => {
   z-index: 10;
 }
 
-.selection-box {
-  position: absolute;
-  border: 2px solid #007bff;
-  background-color: rgba(0, 123, 255, 0.1);
-  pointer-events: none;
-}
-
-// Add cursor styles for drawing mode
 .pdf-container {
   position: relative;
   height: 100%;
   min-height: 500px;
   overflow: auto;
-  background-color: #f8f9fa;
+  background-color: $grey-2;
 
   &:has(.drawing-overlay) {
     cursor: crosshair;
@@ -1251,54 +1219,17 @@ onMounted(() => {
   padding: 1rem;
 }
 
-.accordion-body {
-  padding: 0.75rem 0.5rem !important;
-}
-
-.data-rules-card {
-  .table {
-    th {
-      font-size: 8pt;
-      line-height: 1;
-    }
-
-    td {
-      font-size: 9pt;
-      line-height: 1;
-      vertical-align: middle;
-    }
-  }
-
-  label {
-    font-size: 8pt;
-    line-height: 1;
-  }
-}
-
-.vue-select {
-  padding: 0 !important;
-  --vs-option-font-size: 9pt !important;
-  --vs-font-size: 9pt !important;
-  --vs-min-height: 28px !important;
-  --vs-indicator-icon-size: 23px !important;
-
-  .value-container {
-    padding: 0.15rem 0.5rem !important;
-  }
-
-}
-
 .bounding-box {
   position: absolute;
-  border: 2px solid #28a745;
-  background-color: rgba(40, 167, 69, 0.1);
+  border: 2px solid $positive;
+  background-color: rgba($positive, 0.1);
   pointer-events: none;
 
   .rule-label {
     position: absolute;
     top: -20px;
     left: 0;
-    background-color: #28a745;
+    background-color: $positive;
     color: white;
     padding: 2px 6px;
     border-radius: 3px;
@@ -1307,13 +1238,30 @@ onMounted(() => {
   }
 }
 
-.modal-body {
-  pre {
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    background-color: #f8f9fa;
-    padding: 1rem;
-    border-radius: 0.25rem;
+.data-rules-card {
+  .q-table {
+    th {
+      font-size: 0.8rem;
+      line-height: 1;
+    }
+
+    td {
+      font-size: 0.9rem;
+      line-height: 1;
+      vertical-align: middle;
+    }
+  }
+}
+
+.vue-select {
+  padding: 0 !important;
+  --vs-option-font-size: 0.9rem !important;
+  --vs-font-size: 0.9rem !important;
+  --vs-min-height: 28px !important;
+  --vs-indicator-icon-size: 23px !important;
+
+  .value-container {
+    padding: 0.15rem 0.5rem !important;
   }
 }
 </style>

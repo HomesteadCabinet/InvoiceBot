@@ -1,0 +1,42 @@
+issuer: "Rugby ABP - Salt Lake City"
+required:
+  - invoice_number
+  - issuer
+keywords:
+  - "Rugby ABP - Salt Lake City"
+  - "INVOICE"
+fields:
+  invoice_number:
+    parser: regex
+    regex: "(\d{10}-\d{3})"
+  date:
+    parser: regex
+    regex: "Invoice Date:\s*(\d{2}/\d{2}/\d{2})"
+    type: date
+    date_formats:
+      - "%m/%d/%y"
+  amount:
+    parser: regex
+    regex: "Subtotal\s+([\d\s,]+\.\d{2})"
+    type: float
+  due_date:
+    parser: regex
+    regex: "Due Date:\s*(\d{2}/\d{2}/\d{2})"
+    type: date
+    date_formats:
+      - "%m/%d/%y"
+lines:
+  - start: "SECURITY ALERT:"
+    end: "Subtotal"
+    first_line: "^\s*\d+\s+\d+.*?(SH|ROLL).*?$"
+    line:
+      regex: "(?P<qty>\d+)\s+(?P<shipped>\d+)\s+.*?(?P<uom>SH|ROLL)\s+(?P<sku>[A-Z0-9]+)\s+.*?(?P<unit_price>\d[\d\s,.]*)/\s*(?P=uom).*?(?P<amount>\d[\d\s,.]*)"
+      fields:
+        - qty
+        - shipped
+        - uom
+        - sku
+        - unit_price
+        - amount
+options:
+  currency: "USD"

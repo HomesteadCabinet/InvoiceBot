@@ -6,5 +6,5 @@
 **/admin/**
 **/media/**
 **/staticfiles/**
-
+*Zone.Identifier
 invoiceinator/db.sqlite3

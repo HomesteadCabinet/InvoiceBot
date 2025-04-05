@@ -1,28 +1,37 @@
 {
   "name": "invoice-frontend",
-  "private": true,
-  "version": "0.0.0",
+  "version": "0.0.1",
+  "description": "Invoice Data  Extraction Bot",
+  "productName": "Invoiceinator",
+  "author": "Brad <brad@homesteadcabinet.net>",
   "type": "module",
+  "private": true,
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "lint": "eslint -c ./eslint.config.js \"./src*/**/*.{js,cjs,mjs,vue}\"",
+    "test": "echo \"No test specified\" && exit 0",
+    "dev": "quasar dev",
+    "build": "quasar build",
+    "postinstall": "quasar prepare"
   },
   "dependencies": {
-    "@fortawesome/fontawesome-svg-core": "^6.7.2",
-    "@fortawesome/free-solid-svg-icons": "^6.7.2",
-    "@fortawesome/vue-fontawesome": "^3.0.8",
-    "@popperjs/core": "^2.11.8",
-    "bootstrap": "^5.3.3",
-    "vue": "^3.5.13",
-    "vue-pdf-embed": "^2.1.2",
-    "vue3-select-component": "^0.11.6-beta.2"
+    "@quasar/extras": "^1.16.4",
+    "quasar": "^2.16.0",
+    "vue": "^3.4.18",
+    "vue-router": "^4.0.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^5.2.1",
-    "eslint": "^8.56.0",
-    "eslint-plugin-vue": "^9.21.1",
-    "sass-embedded": "^1.86.1",
-    "vite": "^6.2.0"
+    "@eslint/js": "^9.14.0",
+    "eslint": "^9.14.0",
+    "eslint-plugin-vue": "^9.30.0",
+    "globals": "^15.12.0",
+    "vite-plugin-checker": "^0.9.0",
+    "@quasar/app-vite": "^2.1.0",
+    "autoprefixer": "^10.4.2",
+    "postcss": "^8.4.14"
+  },
+  "engines": {
+    "node": "^28 || ^26 || ^24 || ^22 || ^20 || ^18",
+    "npm": ">= 6.13.4",
+    "yarn": ">= 1.21.1"
   }
 }

@@ -1,7 +1,7 @@
-<script setup>
-import InvoiceList from './components/InvoiceList.vue'
-</script>
-
 <template>
-  <InvoiceList />
+  <router-view />
 </template>
+
+<script setup>
+//
+</script>
