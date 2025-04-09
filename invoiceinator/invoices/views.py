@@ -232,9 +232,33 @@ def process_invoice_email(request):
                 try:
                     tables = extractor.extract_tables()
                     text = extractor.extract_text()
+
+                    # Get table areas and parsing method from vendor rules if available
+                    table_areas = None
+                    parsing_method = 'hybrid'  # Default parsing method
+                    if vendor and vendor.data_rules.exists():
+                        rules = vendor.data_rules.all()
+                        for rule in rules:
+                            if hasattr(rule, 'table_config'):
+                                if rule.table_config.get('bbox'):
+                                    bbox = rule.table_config['bbox']
+                                    # Convert bbox to camelot format: "x1,y1,x2,y2"
+                                    x1 = bbox['x']
+                                    y1 = bbox['y']
+                                    x2 = x1 + bbox['width']
+                                    y2 = y1 + bbox['height']
+                                    if table_areas is None:
+                                        table_areas = []
+                                    table_areas.append(f"{x1},{y1},{x2},{y2}")
+                                # Get parsing method from table config if available
+                                if rule.table_config.get('parsing_method'):
+                                    parsing_method = rule.table_config['parsing_method']
+
+                    image = extractor.generate_debug_image(table_areas=table_areas, parsing_method=parsing_method)
                     print(f"Extracted text length: {len(text) if text else 0}")  # Debug print
                     invoice_data['tables'] = tables
                     invoice_data['text'] = text
+                    invoice_data['image'] = image
                 except Exception as e:
                     print(f"Error during extraction: {str(e)}")  # Debug print
                     errors.append(f"Error extracting data: {str(e)}")
@@ -430,6 +454,7 @@ class DataRuleViewSet(viewsets.ModelViewSet):
 
             # Check if this is a header-only detection request
             detect_only_header = data_rule_json.get('detect_only_header', False)
+            vendor = Vendor.objects.get(id=data_rule_json.get('vendor'))
 
             rule = DataRule(
                 field_name=data_rule_json.get('field_name'),
@@ -438,6 +463,7 @@ class DataRuleViewSet(viewsets.ModelViewSet):
                 location_type=data_rule_json.get('location_type'),
                 coordinates=data_rule_json.get('coordinates'),
                 keyword=data_rule_json.get('keyword'),
+                vendor=vendor,
                 regex_pattern=data_rule_json.get('regex_pattern'),
                 table_config=data_rule_json.get('table_config'),
                 pre_processing=data_rule_json.get('pre_processing'),
@@ -468,43 +494,39 @@ class DataRuleViewSet(viewsets.ModelViewSet):
 
             # Extract data using the rule
             result = None
-            for page in extractor.pdf.pages:
-                if rule.data_type == 'line_items':
-                    if detect_only_header:
-                        # Only detect header row
-                        tables = page.extract_tables()
-                        for table in tables:
-                            header_keyword = rule.table_config.get('header_text', 'code').lower()
-                            for idx, row in enumerate(table):
-                                if row and any(cell and header_keyword in str(cell).lower() for cell in row):
-                                    result = {
-                                        'header_row': row,
-                                        'items': []  # Empty items since we only want header
-                                    }
-                                    break
-                            if result:
-                                break
-                    else:
-                        # Full table extraction
-                        result = extractor.extract_line_items(page, rule)
-                else:
-                    # Use the appropriate extraction method based on location type
-                    if rule.location_type == 'coordinates':
-                        result = extractor._extract_by_coordinates(page, rule)
-                    elif rule.location_type == 'keyword':
-                        result = extractor._extract_by_keyword(page, rule)
-                    elif rule.location_type == 'regex':
-                        result = extractor._extract_by_regex(page, rule)
-                    elif rule.location_type == 'table':
-                        result = extractor._extract_by_table(page, rule)
-                    elif rule.location_type == 'header':
-                        result = extractor._extract_by_table(page, rule)
+            if rule.data_type == 'line_items':
+                if detect_only_header:
+                    # Only detect header row
+                    tables = extractor.extract_tables()
 
-                    if result:
-                        result = extractor._pre_process_text(result, rule.pre_processing)
-                        result = extractor._post_process_text(result, rule.data_type, rule.post_processing)
+                    for table in tables:
+                        header_keyword = rule.table_config.get('header_text', 'code').lower()
+                        for row in table:
+                            if row and any(cell and header_keyword in str(cell).lower() for cell in row):
+                                result = {
+                                    'header_row': row,
+                                    'items': []  # Empty items since we only want header
+                                }
+                                break
+                        if result:
+                            break
+                else:
+                    # Full table extraction
+                    result = extractor.extract_line_items(1, rule)  # Start with page 1
+            else:
+                # Use the appropriate extraction method based on location type
+                if rule.location_type == 'keyword':
+                    result = extractor._extract_by_keyword(1, rule)  # Start with page 1
+                elif rule.location_type == 'regex':
+                    result = extractor._extract_by_regex(1, rule)  # Start with page 1
+                elif rule.location_type == 'table':
+                    result = extractor.extract_tables(1, rule)  # Start with page 1
+                elif rule.location_type == 'header':
+                    result = extractor.extract_tables(1, rule)  # Start with page 1
+
                 if result:
-                    break
+                    result = extractor._pre_process_text(result, rule.pre_processing)
+                    result = extractor._post_process_text(result, rule.data_type, rule.post_processing)
 
             return Response({
                 'success': True,

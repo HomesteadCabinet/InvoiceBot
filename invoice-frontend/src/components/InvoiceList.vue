@@ -11,7 +11,7 @@ const defaultRule = {
   data_type: '',
   location_type: '',
   required: false,
-  bbox: { x: 0, y: 0, width: 0, height: 0 }
+  bbox: { x: 0, y: 0, width: 0, height: 0 },
 }
 
 const emails = ref([])
@@ -42,11 +42,20 @@ const _showDataModal = ref(false)
 const modalTitle = ref('')
 const tableData = ref(null)
 const textData = ref(null)
+const showColumnMappingDialog = ref(false)
+const currentColumnMappingRule = ref(null)
+const fetchingColumns = ref(false)
+const tab = ref('pdf')
+const debugImageUrl = ref(null)
+
+
 
 // Watch for vendorID changes to update dataRules and active vendor
 watch(vendorID, async (newVendorID) => {
+  console.log('vendorID changed', newVendorID)
+  newRule.value = deepClone(defaultRule)
   if (newVendorID) {
-    const selectedVendor = vendors.value.find(v => v.id === newVendorID)
+    const selectedVendor = vendors.value.find(v => v.value === newVendorID)
     if (selectedVendor) {
       activeVendor.value = selectedVendor
       dataRules.value = selectedVendor.data_rules || []
@@ -64,10 +73,14 @@ watch(vendorID, async (newVendorID) => {
   }
 })
 
+watch(newRule, (newRule) => {
+  console.log('newRule changed', newRule)
+})
+
 // Add watch for columnMappings changes
 watch(columnMappings, (newMappings) => {
   console.log('Column mappings updated:', newMappings)
-}, { deep: true })
+})
 
 // Watch for maxResults changes
 watch(maxResults, (newValue) => {
@@ -88,6 +101,8 @@ watch(() => newRule.value.location_type, (newType) => {
     newRule.value.table_config = {
       header_text: 'Description',
       start_row_after_header: 1,
+      parsing_method: 'lattice', // Default to lattice
+      detected_columns: null,
       item_columns: {
         id: 0,
         description: 1,
@@ -101,6 +116,11 @@ watch(() => newRule.value.location_type, (newType) => {
 watch(isDrawing, (newVal) => {
   console.log('isDrawing', newVal)
 })
+
+
+function saveToGoogleSheet() {
+  console.log('saveToGoogleSheet', 1)
+}
 
 function setDisplayData(data) {
   if (data === 'Table Data') {
@@ -118,13 +138,16 @@ function detectTableColumns(rule) {
     return
   }
 
+  fetchingColumns.value = true
+
   const testData = {
     pdf_filename: currentInvoice.value.attachments[0].filename,
     rule: {
       ...rule,
       data_type: 'line_items',
       location_type: 'table',
-      detect_only_header: true  // Add flag to only detect headers
+      detect_only_header: true,  // Add flag to only detect headers
+      vendor: activeVendor.value.id,
     }
   }
 
@@ -169,6 +192,7 @@ function detectTableColumns(rule) {
 
       // Update the columnMappings ref
       columnMappings.value = existingMappings
+      fetchingColumns.value = false
     } else {
       alert('No table header detected. Please check the header text and try again.')
     }
@@ -191,9 +215,20 @@ function testDataRule(rule) {
     return
   }
 
+  // Create a copy of the rule to avoid modifying the original
+  const ruleToTest = {
+    ...rule,
+    vendor: activeVendor.value.id,
+  }
+
+  // Remove bbox if width and height are 0
+  if (ruleToTest.bbox && ruleToTest.bbox.width === 0 && ruleToTest.bbox.height === 0) {
+    delete ruleToTest.bbox
+  }
+
   const testData = {
     pdf_filename: currentInvoice.value.attachments[0].filename,
-    rule: rule
+    rule: ruleToTest
   }
 
   fetch('http://localhost:8000/api/data-rules/test/', {
@@ -326,11 +361,15 @@ async function processEmail(email_id) {
     // Show processing modal with invoice data
     currentInvoice.value = data.invoice
     currentInvoice.value.email_id = email_id
-    vendorID.value = data.vendor.id
+    // Find the vendor in the vendors list and use its value property
+    const vendor = vendors.value.find(v => v.id === data.vendor.id)
+    vendorID.value = vendor ? vendor.value : ''
     status.value = data.status
     showProcessingModal.value = true
     tableData.value = data.invoice.tables
     textData.value = data.invoice.text
+    debugImageUrl.value = data.invoice.image || null
+    tab.value = 'pdf'
   } catch (error) {
     email.status = 'error'
     email.busy = false
@@ -563,6 +602,14 @@ function closeDataModal() {
   displayData.value = null
 }
 
+function openColumnMappingDialog(rule) {
+  if (!rule.table_config?.detected_columns) {
+    detectTableColumns(rule)
+  }
+  currentColumnMappingRule.value = rule
+  showColumnMappingDialog.value = true
+}
+
 onMounted(() => {
   loadEmails()
   fetchVendors()
@@ -573,8 +620,10 @@ onMounted(() => {
 <template>
   <q-card>
     <div class="q-pa-md">
-      <h2>Invoice Emails</h2>
-      <div class="row justify-end q-mb-md">
+      <div class="row justify-between q-mb-md">
+        <div class="col-auto">
+          <h2 class="q-my-none">Invoice Emails</h2>
+        </div>
         <div class="col-auto">
           <div class="row items-center">
             <span class="q-mr-sm">Max Results</span>
@@ -583,6 +632,7 @@ onMounted(() => {
               v-model="maxResults"
               min="1"
               max="100"
+              debounce="3000"
               dense
               outlined
               class="q-mr-sm"
@@ -599,6 +649,7 @@ onMounted(() => {
           </div>
         </div>
       </div>
+
       <q-list bordered separator>
         <q-item
           v-for="email in emails"
@@ -655,61 +706,94 @@ onMounted(() => {
           <!-- Left side: PDF iframe -->
           <div class="col-12 col-md-8">
             <q-card>
-              <q-card-section>
-                <div class="text-h6">Invoice Preview</div>
+              <q-card-section class="q-py-sm">
+                <div class="row">
+                  <div class="col">
+                    <!-- Removed title from here -->
+                  </div>
+                  <!-- Removed debug image button from here -->
+                </div>
               </q-card-section>
 
-              <q-card-section class="q-pa-none" style="height: 600px;">
-                <div v-if="currentInvoice?.attachments?.length" class="attachments-container">
-                  <div v-for="(attachment, index) in currentInvoice.attachments"
-                       :key="index"
-                       class="attachment-frame">
-                    <div class="attachment-header">
-                      <h6 class="q-ma-none">
-                        <a :href="attachment.url" target="_blank">{{ attachment.filename }}</a>
-                      </h6>
-                    </div>
-                    <div class="pdf-container" ref="pdfContainer"
-                         @mousedown="startDrawing"
-                         @mousemove="updateDrawing"
-                         @mouseup="stopDrawing"
-                         @mouseleave="stopDrawing">
-                      <VuePdfEmbed
-                        :source="attachment.url"
-                        :page="1"
-                        @error="onPdfError"
-                        @loading="onPdfLoading"
-                        @loaded="onPdfLoaded"
-                      />
-                      <div v-if="drawingEnabled" class="drawing-overlay">
-                        <div v-if="isDrawing" class="bounding-box active" :style="selectionBox"></div>
-                        <div v-if="currentBoundingBox && !isDrawing"
-                             class="bounding-box active"
-                             :style="currentBoundingBox">
-                          <span v-if="currentBoundingBox.ruleName" class="rule-label">{{ currentBoundingBox.ruleName }}</span>
+              <!-- Add Tabs -->
+              <q-tabs
+                v-model="tab"
+                dense
+                class="text-grey"
+                active-color="primary"
+                indicator-color="primary"
+                align="justify"
+                narrow-indicator
+              >
+                <q-tab name="pdf" label="PDF Preview" />
+                <q-tab name="debug" label="Debug Image" :disable="!debugImageUrl" />
+              </q-tabs>
+
+              <q-separator />
+
+              <q-tab-panels v-model="tab" animated keep-alive>
+                <q-tab-panel name="pdf" class="q-pa-none" style="height: 70vh;">
+                  <div v-if="currentInvoice?.attachments?.length" class="attachments-container">
+                    <div
+                      v-for="(attachment, index) in currentInvoice.attachments"
+                      :key="index"
+                      class="attachment-frame"
+                    >
+                      <div class="pdf-container" ref="pdfContainer"
+                           @mousedown="startDrawing"
+                           @mousemove="updateDrawing"
+                           @mouseup="stopDrawing"
+                           @mouseleave="stopDrawing"
+                      >
+                        <a :href="attachment.url" target="_blank">
+                          {{ attachment.url }}
+                        </a>
+                          <VuePdfEmbed
+                            :source="attachment.url"
+                            :page="1"
+                            @error="onPdfError"
+                            @loading="onPdfLoading"
+                            @loaded="onPdfLoaded"
+                          />
+                        <div v-if="drawingEnabled" class="drawing-overlay">
+                          <div v-if="isDrawing" class="bounding-box active" :style="selectionBox"></div>
+                          <div v-if="currentBoundingBox && !isDrawing"
+                               class="bounding-box active"
+                               :style="currentBoundingBox">
+                            <span v-if="currentBoundingBox.ruleName" class="rule-label">{{ currentBoundingBox.ruleName }}</span>
+                          </div>
                         </div>
-                      </div>
-                      <pre>{{ pdfText }}</pre>
-                      <div v-if="pdfLoading" class="pdf-loading">
-                        <q-spinner color="primary" size="3em" />
-                      </div>
-                      <div v-if="pdfError" class="pdf-error text-negative">
-                        Error loading PDF: {{ pdfError }}
+                        <pre>{{ pdfText }}</pre>
+                        <div v-if="pdfLoading" class="pdf-loading">
+                          <q-spinner color="primary" size="3em" />
+                        </div>
+                        <div v-if="pdfError" class="pdf-error text-negative">
+                          Error loading PDF: {{ pdfError }}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-                <div v-else class="text-center q-pa-md">
-                  No preview available
-                </div>
-              </q-card-section>
+                  <div v-else class="text-center q-pa-md">
+                    No preview available
+                  </div>
+                </q-tab-panel>
+
+                <q-tab-panel name="debug" class="q-pa-md" style="height: 70vh; overflow: auto;">
+                   <div v-if="debugImageUrl" class="text-center">
+                     <img :src="debugImageUrl" alt="Debug Image" style="max-width: 100%; height: auto;" />
+                   </div>
+                   <div v-else class="text-center q-pa-md">
+                     No debug image available.
+                   </div>
+                </q-tab-panel>
+              </q-tab-panels>
             </q-card>
           </div>
 
           <!-- Right side: Form controls -->
           <div class="col-12 col-md-4">
             <q-card style="height: 100% ;">
-              <q-card-section>
+              <q-card-section class="q-py-sm">
                 <div class="text-h6">Data Rules</div>
               </q-card-section>
               <q-card-section class="data-rules-card">
@@ -721,9 +805,9 @@ onMounted(() => {
                 >
                   <q-card>
                     <q-card-section>
-                      <form @submit.prevent="addDataRule" class="q-gutter-md">
-                        <div class="row q-col-gutter-sm">
-                          <div class="col-md-6">
+                      <form @submit.prevent="addDataRule">
+                        <div class="row">
+                          <div class="col-6">
                             <q-input
                               v-model="newRule.field_name"
                               label="Field Name"
@@ -732,7 +816,7 @@ onMounted(() => {
                               required
                             />
                           </div>
-                          <div class="col-md-3">
+                          <div class="col-3">
                             <q-select
                               v-model="newRule.data_type"
                               :options="['text', 'number', 'date', 'currency', 'email', 'phone', 'line_items']"
@@ -742,27 +826,29 @@ onMounted(() => {
                               required
                             />
                           </div>
-                          <div class="col-md-3">
+                          <div class="col-3">
                             <q-select
                               v-model="newRule.location_type"
-                              :options="['keyword', 'regex', 'table', 'header']"
+                              :options="['keyword', 'regex', 'table']"
                               label="Locator"
                               dense
                               outlined
                               required
                             />
                           </div>
+
+                          <div class="col-12 q-my-sm">
+                            <q-btn
+                              :color="drawingEnabled ? 'positive' : 'primary'"
+                              class="full-width"
+                              :label="drawingEnabled ? 'Drawing Mode Active - Click to Disable' : 'Enable Drawing Mode'"
+                              @click="drawingEnabled = !drawingEnabled"
+                            />
+                          </div>
                         </div>
 
-                        <q-btn
-                          :color="drawingEnabled ? 'positive' : 'primary'"
-                          class="full-width"
-                          :icon="drawingEnabled ? 'crosshairs' : 'draw-polygon'"
-                          :label="drawingEnabled ? 'Drawing Mode Active - Click to Disable' : 'Enable Drawing Mode'"
-                          @click="drawingEnabled = !drawingEnabled"
-                        />
 
-                        <div v-if="drawingEnabled" class="row q-col-gutter-sm">
+                        <div v-if="drawingEnabled" class="row">
                           <div class="col-3">
                             <q-input
                               v-model="newRule.bbox.x"
@@ -838,53 +924,28 @@ onMounted(() => {
                             outlined
                             class="q-mt-sm"
                           />
+                          <q-select
+                            v-model="newRule.table_config.parsing_method"
+                            :options="['stream', 'lattice', 'network', 'hybrid']"
+                            label="Parsing Method"
+                            dense
+                            outlined
+                            @update:model-value="() => {
+                              newRule.table_config.detected_columns = null;
+                              newRule.table_config.item_columns = {};
+                            }"
+                            class="q-mt-sm"
+                          />
+
                           <q-btn
                             color="primary"
                             class="q-mt-sm"
-                            @click="detectTableColumns(newRule)"
+                            :icon="newRule.table_config?.detected_columns ? 'edit' : 'map'"
+                            @click="openColumnMappingDialog(newRule)"
                           >
-                            <span v-if="!newRule.table_config?.detected_columns">Detect Columns</span>
-                            <span v-else>Re-detect Columns</span>
+                            <span v-if="!newRule.table_config?.detected_columns">Map Columns</span>
+                            <span v-else>Edit Column Mapping</span>
                           </q-btn>
-
-                          <div v-if="newRule.table_config?.detected_columns" class="q-mt-sm">
-                            <div class="text-subtitle2">Map Detected Columns</div>
-                            <q-table
-                              :rows="newRule.table_config.detected_columns.map((colName, index) => ({
-                                colName,
-                                index,
-                                mapping: newRule.table_config.item_columns[colName] || ''
-                              }))"
-                              :columns="[
-                                { name: 'colName', label: 'Column Name', field: 'colName' },
-                                { name: 'mapping', label: 'Map To', field: 'mapping' },
-                                { name: 'index', label: 'Index', field: 'index' }
-                              ]"
-                              dense
-                              flat
-                              bordered
-                            >
-                              <template v-slot:body="props">
-                                <q-tr :props="props">
-                                  <q-td key="colName" :props="props">
-                                    {{ props.row.colName }}
-                                  </q-td>
-                                  <q-td key="mapping" :props="props">
-                                    <q-select
-                                      v-model="newRule.table_config.item_columns[props.row.colName]"
-                                      :options="['', 'id', 'description', 'quantity', 'unit_price', 'total_amount']"
-                                      dense
-                                      outlined
-                                      @update:model-value="value => handleTableColumnMapping(props.row.colName, { target: { value } })"
-                                    />
-                                  </q-td>
-                                  <q-td key="index" :props="props">
-                                    {{ props.row.index }}
-                                  </q-td>
-                                </q-tr>
-                              </template>
-                            </q-table>
-                          </div>
                         </div>
 
                         <div class="row q-mt-md">
@@ -927,7 +988,7 @@ onMounted(() => {
                         ]"
                         dense
                         flat
-                        bordered
+                        square
                       >
                         <template v-slot:body="props">
                           <q-tr :props="props">
@@ -1056,6 +1117,10 @@ onMounted(() => {
                 :options="vendors"
                 :clearable="false"
                 placeholder="Select a vendor"
+                option-value="value"
+                option-label="label"
+                emit-value
+                map-options
                 dense
                 outlined
                 class="q-mr-sm"
@@ -1115,6 +1180,70 @@ onMounted(() => {
       </q-card-actions>
     </q-card>
   </q-dialog>
+
+  <!-- Column Mapping Dialog -->
+  <q-dialog v-model="showColumnMappingDialog">
+    <q-card>
+      <q-card-section class="row items-center q-pb-none">
+        <div class="text-h6">Configure Column Mappings</div>
+        <q-space />
+        <q-btn icon="close" flat round dense v-close-popup />
+      </q-card-section>
+
+      <q-card-section>
+        <div v-if="currentColumnMappingRule?.table_config?.detected_columns">
+          <q-table
+            :pagination="{
+              rowsPerPage: 10,
+              sortBy: 'index',
+              descending: true
+            }"
+            :rows="currentColumnMappingRule.table_config.detected_columns.map((colName, index) => ({
+              colName,
+              index,
+              mapping: currentColumnMappingRule.table_config.item_columns[colName] || ''
+            }))"
+            :columns="[
+              { name: 'colName', label: 'Column Name', field: 'colName' },
+              { name: 'mapping', label: 'Map To', field: 'mapping' },
+              { name: 'index', label: 'Index', field: 'index' }
+            ]"
+            dense
+            flat
+            bordered
+          >
+            <template v-slot:body="props">
+              <q-tr :props="props">
+                <q-td key="colName" :props="props">
+                  {{ props.row.colName }}
+                </q-td>
+                <q-td key="mapping" :props="props">
+                  <q-select
+                    v-model="currentColumnMappingRule.table_config.item_columns[props.row.colName]"
+                    :options="['none', 'id', 'description', 'quantity', 'unit_price', 'total_amount']"
+                    dense
+                    outlined
+                    @update:model-value="value => handleTableColumnMapping(props.row.colName, { target: { value } })"
+                  />
+                </q-td>
+                <q-td key="index" :props="props">
+                  {{ props.row.index }}
+                </q-td>
+              </q-tr>
+            </template>
+          </q-table>
+        </div>
+        <div v-else class="text-center q-pa-md">
+          <q-spinner-dots v-if="fetchingColumns" color="primary" size="24px" />
+          <div v-else>No columns detected yet. Please click "Detect Columns" first.</div>
+        </div>
+      </q-card-section>
+
+      <q-card-actions align="right">
+        <q-btn flat label="Close" color="primary" v-close-popup />
+      </q-card-actions>
+    </q-card>
+  </q-dialog>
 </template>
 
 <style lang="scss">
@@ -1159,7 +1288,6 @@ onMounted(() => {
 .attachments-container {
   height: 100%;
   overflow-y: auto;
-  padding: 1rem;
 }
 
 .attachment-frame {
@@ -1239,6 +1367,10 @@ onMounted(() => {
 }
 
 .data-rules-card {
+  .q-card__section {
+    padding: 0;
+  }
+
   .q-table {
     th {
       font-size: 0.8rem;
@@ -1253,15 +1385,13 @@ onMounted(() => {
   }
 }
 
-.vue-select {
-  padding: 0 !important;
-  --vs-option-font-size: 0.9rem !important;
-  --vs-font-size: 0.9rem !important;
-  --vs-min-height: 28px !important;
-  --vs-indicator-icon-size: 23px !important;
-
-  .value-container {
-    padding: 0.15rem 0.5rem !important;
-  }
+// Ensure tab panels have consistent height
+.q-tab-panels {
+  height: 70vh; // Match the height set on individual panels
 }
+
+.q-tab-panel {
+  height: 100%; // Ensure panel takes full height of container
+}
+
 </style>
