@@ -61,7 +61,7 @@ MIDDLEWARE = [
 CORS_ALLOW_ALL_ORIGINS = True  # Only for development
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:9000",
+    "http://localhost:9000",  # Vue dev server
     "http://127.0.0.1:9000",
 ]
 

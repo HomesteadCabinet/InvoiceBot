@@ -4,12 +4,11 @@ from .views import (
     list_invoice_emails,
     process_invoice_email,
     get_email_attachments,
-    DataRuleViewSet,
-    VendorViewSet
+    VendorViewSet,
+    test_parser
 )
 
 router = DefaultRouter()
-router.register(r'data-rules', DataRuleViewSet)
 router.register(r'vendors', VendorViewSet)
 
 urlpatterns = [
@@ -17,4 +16,5 @@ urlpatterns = [
     path('process-email/', process_invoice_email),
     path('emails/<str:email_id>/attachments/', get_email_attachments),
     path('', include(router.urls)),
+    path('test-parser/', test_parser),
 ]

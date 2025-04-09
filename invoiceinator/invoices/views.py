@@ -2,9 +2,9 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
-from .utils import get_gmail_service, get_sheets_service, DataExtractor
-from .models import ProcessedEmail, Vendor, VendorEmail, DataRule
-from .serializers import DataRuleSerializer, VendorSerializer
+from .utils import get_gmail_service, get_sheets_service, DataExtractor, get_module_functions
+from .models import ProcessedEmail, Vendor, VendorEmail
+from .serializers import VendorSerializer
 from django.conf import settings
 import os
 from datetime import datetime
@@ -15,6 +15,18 @@ import json
 
 # Store temporary files with their creation time
 temp_files = {}
+
+# List of email domains that require special handling (extracting name before email)
+SPECIAL_EMAIL_DOMAINS = [
+    'notification.intuit.com',
+    'billtrust.com',
+    'live.com',
+    'outlook.com',
+    'gmail.com',
+    'yahoo.com',
+    'hotmail.com',
+    'msn.com',
+]
 
 
 def cleanup_temp_files():
@@ -115,12 +127,45 @@ def list_invoice_emails(request):
         # Try to find matching vendor based on sender email
         vendor_name = None
         if from_header:
+            # Extract email address from the from_header (handles both "Name <email@domain.com>" and "email@domain.com" formats)
             email_match = re.search(r'<(.+?)>|([^<\s]+@[^>\s]+)', from_header)
             if email_match:
                 sender_email = email_match.group(1) or email_match.group(2)
-                vendor_email = VendorEmail.objects.filter(email=sender_email).first()
-                if vendor_email:
-                    vendor_name = vendor_email.vendor.name
+
+                # Special handling for emails from specific domains
+                if any(sender_email.endswith(f'@{domain}') for domain in SPECIAL_EMAIL_DOMAINS):
+                    # Extract the name before the email address
+                    name_match = re.search(r'^(.+?)\s*<', from_header)
+                    if name_match:
+                        vendor_name = name_match.group(1).strip()
+                    else:
+                        # Fallback to domain-based name if no name found
+                        domain_match = re.search(r'@(.+?)\.[^.]+$', sender_email)
+                        vendor_name = domain_match.group(1).title() if domain_match else "Unknown"
+                else:
+                    # Original domain-based name extraction for other emails
+                    domain_match = re.search(r'@(.+?)\.[^.]+$', sender_email)
+                    vendor_name = domain_match.group(1).title() if domain_match else "Unknown"
+
+                try:
+                    # Create or update vendor
+                    vendor, created = Vendor.objects.update_or_create(
+                        name=vendor_name,
+                        defaults={
+                            'invoice_type': 'pdf'  # Default to PDF, can be updated later
+                        }
+                    )
+
+                    # Create or update vendor email
+                    VendorEmail.objects.update_or_create(
+                        email=sender_email,
+                        defaults={
+                            'vendor': vendor,
+                            'is_primary': True
+                        }
+                    )
+                except Exception as e:
+                    errors.append(f"Error creating/updating vendor: {str(e)}")
 
         obj = ProcessedEmail.objects.filter(email_id=msg['id']).first()
         if obj:
@@ -162,30 +207,41 @@ def process_invoice_email(request):
         email_match = re.search(r'<(.+?)>|([^<\s]+@[^>\s]+)', from_header)
         if email_match:
             sender_email = email_match.group(1) or email_match.group(2)
-            # Extract domain name (everything between @ and last dot)
-            domain_match = re.search(r'@(.+?)\.[^.]+$', sender_email)
-            if domain_match:
-                vendor_name = domain_match.group(1).title()  # Capitalize first letter of each word
 
-                try:
-                    # Create or update vendor
-                    vendor, created = Vendor.objects.update_or_create(
-                        name=vendor_name,
-                        defaults={
-                            'invoice_type': 'pdf'  # Default to PDF, can be updated later
-                        }
-                    )
+            # Special handling for emails from specific domains
+            if any(sender_email.endswith(f'@{domain}') for domain in SPECIAL_EMAIL_DOMAINS):
+                # Extract the name before the email address
+                name_match = re.search(r'^(.+?)\s*<', from_header)
+                if name_match:
+                    vendor_name = name_match.group(1).strip()
+                else:
+                    # Fallback to domain-based name if no name found
+                    domain_match = re.search(r'@(.+?)\.[^.]+$', sender_email)
+                    vendor_name = domain_match.group(1).title() if domain_match else "Unknown"
+            else:
+                # Original domain-based name extraction for other emails
+                domain_match = re.search(r'@(.+?)\.[^.]+$', sender_email)
+                vendor_name = domain_match.group(1).title() if domain_match else "Unknown"
 
-                    # Create or update vendor email
-                    VendorEmail.objects.update_or_create(
-                        email=sender_email,
-                        defaults={
-                            'vendor': vendor,
-                            'is_primary': True
-                        }
-                    )
-                except Exception as e:
-                    errors.append(f"Error creating/updating vendor: {str(e)}")
+            try:
+                # Create or update vendor
+                vendor, created = Vendor.objects.update_or_create(
+                    name=vendor_name,
+                    defaults={
+                        'invoice_type': 'pdf'  # Default to PDF, can be updated later
+                    }
+                )
+
+                # Create or update vendor email
+                VendorEmail.objects.update_or_create(
+                    email=sender_email,
+                    defaults={
+                        'vendor': vendor,
+                        'is_primary': True
+                    }
+                )
+            except Exception as e:
+                errors.append(f"Error creating/updating vendor: {str(e)}")
 
     # Create media directory if it doesn't exist
     media_dir = settings.MEDIA_ROOT
@@ -228,44 +284,27 @@ def process_invoice_email(request):
                 extractor = DataExtractor(file_path, debug=True)
 
                 # Extract all tables from the PDF and add to invoice_data
-                all_tables = []
-                try:
-                    tables = extractor.extract_tables()
-                    text = extractor.extract_text()
+                # all_tables = []
+                # try:
+                #     # tables = extractor.extract_tables()
+                #     # text = extractor.extract_text()
 
-                    # Get table areas and parsing method from vendor rules if available
-                    table_areas = None
-                    parsing_method = 'hybrid'  # Default parsing method
-                    if vendor and vendor.data_rules.exists():
-                        rules = vendor.data_rules.all()
-                        for rule in rules:
-                            if hasattr(rule, 'table_config'):
-                                if rule.table_config.get('bbox'):
-                                    bbox = rule.table_config['bbox']
-                                    # Convert bbox to camelot format: "x1,y1,x2,y2"
-                                    x1 = bbox['x']
-                                    y1 = bbox['y']
-                                    x2 = x1 + bbox['width']
-                                    y2 = y1 + bbox['height']
-                                    if table_areas is None:
-                                        table_areas = []
-                                    table_areas.append(f"{x1},{y1},{x2},{y2}")
-                                # Get parsing method from table config if available
-                                if rule.table_config.get('parsing_method'):
-                                    parsing_method = rule.table_config['parsing_method']
+                #     # Get table areas and parsing method from vendor rules if available
+                #     table_areas = None
+                #     parsing_method = 'hybrid'  # Default parsing method
 
-                    image = extractor.generate_debug_image(table_areas=table_areas, parsing_method=parsing_method)
-                    print(f"Extracted text length: {len(text) if text else 0}")  # Debug print
-                    invoice_data['tables'] = tables
-                    invoice_data['text'] = text
-                    invoice_data['image'] = image
-                except Exception as e:
-                    print(f"Error during extraction: {str(e)}")  # Debug print
-                    errors.append(f"Error extracting data: {str(e)}")
+                #     # image = extractor.generate_debug_image(table_areas=table_areas, parsing_method=parsing_method)
+                #     print(f"Extracted text length: {len(text) if text else 0}")  # Debug print
+                #     # invoice_data['tables'] = tables
+                #     # invoice_data['text'] = text
+                #     # invoice_data['image'] = image
+                # except Exception as e:
+                #     print(f"Error during extraction: {str(e)}")  # Debug print
+                #     errors.append(f"Error extracting data: {str(e)}")
 
                 # If vendor rules exist, also extract data using those rules
-                if vendor and vendor.data_rules.exists():
-                    extracted_data = extractor.extract_data(vendor.data_rules.all())
+                if vendor:
+                    extracted_data = extractor.extract_data([])
                     invoice_data['vendor_extracted_data'] = extracted_data
 
                 # Create or update ProcessedEmail record
@@ -360,189 +399,62 @@ def cleanup_attachment(request):
     return Response({'error': 'File not found'}, status=404)
 
 
-class DataRuleViewSet(viewsets.ModelViewSet):
+@api_view(['POST'])
+def test_parser(request):
     """
-    A ViewSet for viewing and editing data rules.
+    Test a data rule against a PDF file.
     """
-    queryset = DataRule.objects.all()
-    serializer_class = DataRuleSerializer
+    parser_data = request.data.get('parser')
+    if not parser_data:
+        return Response({'error': 'Parser data is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['post'])
-    def bulk_create(self, request):
-        """
-        Bulk create or update data rules for a vendor.
-        Expected request data:
-        {
-            "vendor_id": 1,
-            "rules": [
-                {
-                    "field_name": "invoice_number",
-                    "data_type": "text",
-                    ...
-                },
-                ...
-            ]
-        }
-        """
-        try:
-            data = request.data
-            vendor_id = data.get('vendor_id')
-            rules = data.get('rules', [])
+    parser_method = parser_data.get('method')
+    if not parser_method:
+        return Response({'error': 'Parser method is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-            if not vendor_id:
-                return Response(
-                    {'error': 'vendor_id is required'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+    pdf_filename = request.data.get('pdf_filename')
+    if not pdf_filename:
+        return Response({'error': 'pdf_filename is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Get or create vendor
-            vendor, created = Vendor.objects.get_or_create(
-                id=vendor_id,
-                defaults={'name': f'Vendor {vendor_id}', 'invoice_type': 'pdf'}
-            )
+    # Construct the full path to the file in the media folder
+    media_dir = settings.MEDIA_ROOT
+    file_path = os.path.join(media_dir, pdf_filename)
 
-            created_rules = []
+    # Check if the file exists
+    if not os.path.exists(file_path):
+        return Response(
+            {'error': f'File {pdf_filename} not found in media folder'},
+            status=status.HTTP_404_NOT_FOUND
+        )
 
-            # Update or create rules
-            for rule_data in rules:
-                rule_data['vendor_id'] = vendor.id
-                field_name = rule_data.get('field_name')
+    try:
+        # Import the parser function dynamically
+        from . import parsers
+        parser_func = getattr(parsers, parser_method, None)
 
-                try:
-                    # Try to get existing rule
-                    existing_rule = DataRule.objects.get(vendor=vendor, field_name=field_name)
-                    serializer = self.get_serializer(existing_rule, data=rule_data)
-                except DataRule.DoesNotExist:
-                    # Create new rule if it doesn't exist
-                    serializer = self.get_serializer(data=rule_data)
-
-                serializer.is_valid(raise_exception=True)
-                rule = serializer.save()
-                created_rules.append(rule)
-
-            return Response({
-                'message': f'Successfully processed {len(created_rules)} rules',
-                'rules': self.get_serializer(created_rules, many=True).data
-            })
-
-        except Exception as e:
+        if not parser_func:
             return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {'error': f'Parser method {parser_method} not found'},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
-    @action(detail=False, methods=['post'])
-    def test(self, request, pk=None):
-        """
-        Test a data rule against a PDF file.
-        Expected request data example:
-        {
-            "pdf_filename": "filename.pdf",
-            "rule": {
-                "field_name": "invoice_number",
-                "data_type": "text",
-                "location_type": "regex",
-                "regex_pattern": "Invoice\s*#?\s*([A-Z0-9-]+)"
-            }
-        }
-        """
-        try:
-            # Get the data rule from the request
-            data_rule_json = request.data.get('rule')
-            if not data_rule_json:
-                return Response({'error': 'No data rule provided'}, status=400)
+        # Run the parser
+        result = parser_func(file_path)
 
-            # Check if this is a header-only detection request
-            detect_only_header = data_rule_json.get('detect_only_header', False)
-            vendor = Vendor.objects.get(id=data_rule_json.get('vendor'))
+        # Convert pandas DataFrame to dict if needed
+        if hasattr(result, 'to_dict'):
+            result = result.to_dict('records')
 
-            rule = DataRule(
-                field_name=data_rule_json.get('field_name'),
-                bbox=data_rule_json.get('bbox'),
-                data_type=data_rule_json.get('data_type'),
-                location_type=data_rule_json.get('location_type'),
-                coordinates=data_rule_json.get('coordinates'),
-                keyword=data_rule_json.get('keyword'),
-                vendor=vendor,
-                regex_pattern=data_rule_json.get('regex_pattern'),
-                table_config=data_rule_json.get('table_config'),
-                pre_processing=data_rule_json.get('pre_processing'),
-                post_processing=data_rule_json.get('post_processing')
-            )
+        return Response({
+            'success': True,
+            'result': result
+        })
 
-            pdf_filename = request.data.get('pdf_filename')
-
-            if not pdf_filename:
-                return Response(
-                    {'error': 'pdf_filename is required'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Construct the full path to the file in the media folder
-            media_dir = settings.MEDIA_ROOT
-            file_path = os.path.join(media_dir, pdf_filename)
-
-            # Check if the file exists
-            if not os.path.exists(file_path):
-                return Response(
-                    {'error': f'File {pdf_filename} not found in media folder'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-
-            # Initialize the DataExtractor
-            extractor = DataExtractor(file_path, debug=True)
-
-            # Extract data using the rule
-            result = None
-            if rule.data_type == 'line_items':
-                if detect_only_header:
-                    # Only detect header row
-                    tables = extractor.extract_tables()
-
-                    for table in tables:
-                        header_keyword = rule.table_config.get('header_text', 'code').lower()
-                        for row in table:
-                            if row and any(cell and header_keyword in str(cell).lower() for cell in row):
-                                result = {
-                                    'header_row': row,
-                                    'items': []  # Empty items since we only want header
-                                }
-                                break
-                        if result:
-                            break
-                else:
-                    # Full table extraction
-                    result = extractor.extract_line_items(1, rule)  # Start with page 1
-            else:
-                # Use the appropriate extraction method based on location type
-                if rule.location_type == 'keyword':
-                    result = extractor._extract_by_keyword(1, rule)  # Start with page 1
-                elif rule.location_type == 'regex':
-                    result = extractor._extract_by_regex(1, rule)  # Start with page 1
-                elif rule.location_type == 'table':
-                    result = extractor.extract_tables(1, rule)  # Start with page 1
-                elif rule.location_type == 'header':
-                    result = extractor.extract_tables(1, rule)  # Start with page 1
-
-                if result:
-                    result = extractor._pre_process_text(result, rule.pre_processing)
-                    result = extractor._post_process_text(result, rule.data_type, rule.post_processing)
-
-            return Response({
-                'success': True,
-                'result': result,
-                'rule_applied': {
-                    'field_name': rule.field_name,
-                    'data_type': rule.data_type,
-                    'location_type': rule.location_type
-                }
-            })
-
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+    except Exception as e:
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 class VendorViewSet(viewsets.ModelViewSet):
@@ -551,6 +463,13 @@ class VendorViewSet(viewsets.ModelViewSet):
     """
     queryset = Vendor.objects.all()
     serializer_class = VendorSerializer
+
+    def update(self, request, *args, **kwargs):
+        """
+        Update a vendor.
+        """
+        obj = self.get_object()
+        return super().update(request, *args, **kwargs)
 
     def get_queryset(self):
         """
@@ -562,15 +481,19 @@ class VendorViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(name__icontains=name)
         return queryset
 
-    @action(detail=True, methods=['get'])
-    def data_rules(self, request, pk=None):
+    @action(detail=False, methods=['get'])
+    def get_invoice_parsers(self, request):
         """
-        Get all data rules for a specific vendor
+        Get a list of available parser methods from parsers.py
         """
-        vendor = self.get_object()
-        data_rules = vendor.data_rules.all()
-        serializer = DataRuleSerializer(data_rules, many=True)
-        return Response(serializer.data)
+        try:
+            parsers_path = os.path.join(os.path.dirname(__file__), 'parsers.py')
+            available_parsers = get_module_functions(parsers_path)
+            return Response({
+                'available_parsers': available_parsers,
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['get'])
     def emails(self, request, pk=None):
