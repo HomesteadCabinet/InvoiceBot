@@ -2,7 +2,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
-from .utils import get_gmail_service, get_sheets_service, DataExtractor, get_module_functions
+from .utils import get_gmail_service, get_sheets_service
 from .models import ProcessedEmail, Vendor, VendorEmail
 from .serializers import VendorSerializer
 from django.conf import settings
@@ -11,7 +11,7 @@ from datetime import datetime
 import time
 import re
 import base64
-import json
+import traceback
 
 # Store temporary files with their creation time
 temp_files = {}
@@ -29,6 +29,37 @@ SPECIAL_EMAIL_DOMAINS = [
 ]
 
 
+def get_module_functions(module_path):
+    """
+    Get a list of all function names defined in a Python module.
+
+    Args:
+        module_path (str): Path to the Python module
+
+    Returns:
+        list: List of function names
+    """
+    import importlib.util
+    import inspect
+
+    # Get the module name from the file path
+    module_name = os.path.splitext(os.path.basename(module_path))[0]
+
+    # Load the module
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # Get all functions
+    functions = []
+    for name, obj in inspect.getmembers(module):
+        if inspect.isfunction(obj) and obj.__module__ == module_name:
+            # Use obj.name if it exists, otherwise use name
+            functions.append({'method': name, 'name': getattr(obj, 'name', name)})
+
+    return functions
+
+
 def cleanup_temp_files():
     """Clean up temporary files older than 5 minutes"""
     current_time = time.time()
@@ -41,54 +72,6 @@ def cleanup_temp_files():
             except Exception as e:
                 print(f"Error cleaning up file {file_path}: {e}")
 
-
-def write_to_spreadsheet(invoice_data: dict, vendor: Vendor = None) -> None:
-    """
-    Write invoice data to Google Spreadsheet.
-
-    Args:
-        invoice_data (dict): Dictionary containing invoice data
-        vendor (Vendor, optional): Vendor object if available
-
-    Raises:
-        Exception: If there's an error writing to the spreadsheet
-    """
-    try:
-        sheets_service = get_sheets_service()
-
-        # Get column mappings from vendor
-        column_mappings = vendor.spreadsheet_column_mapping if vendor else {}
-
-        # Create a row with empty values for all columns up to the highest mapped column
-        max_col = 'A'
-        for col in column_mappings.values():
-            if col > max_col:
-                max_col = col
-
-        # Create a list with empty strings up to the max column
-        row_data = [''] * (ord(max_col) - ord('A') + 1)
-
-        # Fill in the data based on column mappings
-        for field_name, col in column_mappings.items():
-            if field_name in invoice_data:
-                col_index = ord(col) - ord('A')
-                row_data[col_index] = invoice_data.get(field_name, '')
-
-        # Add vendor name and timestamp at the end if not mapped
-        if vendor and 'vendor_name' not in column_mappings:
-            row_data.append(vendor.name)
-        if 'timestamp' not in column_mappings:
-            row_data.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-        # Write to spreadsheet
-        sheets_service.spreadsheets().values().append(
-            spreadsheetId=settings.SHEET_ID,
-            range=f"Sheet1!A:{chr(ord('A') + len(row_data) - 1)}",
-            valueInputOption="USER_ENTERED",
-            body={'values': [row_data]}
-        ).execute()
-    except Exception as e:
-        raise Exception(f"Failed to write to spreadsheet: {str(e)}")
 
 
 @api_view(['GET'])
@@ -281,7 +264,7 @@ def process_invoice_email(request):
                 invoice_data["attachments"] = attachments
 
                 # Extract data from PDF using vendor-specific rules if available
-                extractor = DataExtractor(file_path, debug=True)
+                # extractor = DataExtractor(file_path, debug=True)
 
                 # Extract all tables from the PDF and add to invoice_data
                 # all_tables = []
@@ -328,82 +311,12 @@ def process_invoice_email(request):
     })
 
 
-@api_view(['GET'])
-def get_email_attachments(request, email_id):
-    service = get_gmail_service()
-    try:
-        # Get the email message
-        email = service.users().messages().get(userId='me', id=email_id).execute()
-
-        attachments = []
-        for part in email['payload']['parts']:
-            if part.get('filename'):
-                attachment = service.users().messages().attachments().get(
-                    userId='me', messageId=email_id, id=part['body']['attachmentId']).execute()
-                # Import base64 at the top of the file
-
-                # Decode the attachment data
-                file_data = base64.urlsafe_b64decode(
-                    attachment['data'].encode('UTF-8')
-                )
-
-                # Create media directory if it doesn't exist
-                media_dir = settings.MEDIA_ROOT
-                os.makedirs(media_dir, exist_ok=True)
-
-                # Create a unique filename using email_id and original filename
-                original_filename = part['filename']
-                file_extension = os.path.splitext(original_filename)[1]
-                # Sanitize the filename by replacing spaces and special characters
-                safe_filename = re.sub(r'[^a-zA-Z0-9.-]', '_', original_filename)
-                unique_filename = f"{email_id}_{safe_filename}"
-                file_path = os.path.join(media_dir, unique_filename)
-
-                # Save the file
-                with open(file_path, 'wb') as f:
-                    f.write(file_data)
-
-                # Get the file URL - properly encode the filename
-                file_url = request.build_absolute_uri(f'/media/{unique_filename}')
-
-                attachments.append({
-                    'filename': unique_filename,
-                    'mimeType': part['mimeType'],
-                    'size': part['body'].get('size', 0),
-                    'url': file_url
-                })
-
-        return Response({
-            'attachments': attachments,
-            'message': f'Found {len(attachments)} attachments'
-        })
-
-    except Exception as e:
-        return Response({
-            'error': str(e)
-        }, status=500)
-
-
-@api_view(['POST'])
-def cleanup_attachment(request):
-    """Endpoint to clean up a specific attachment file"""
-    file_path = request.data.get('file_path')
-    if file_path and file_path in temp_files:
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            del temp_files[file_path]
-            return Response({'status': 'success'})
-        except Exception as e:
-            return Response({'error': str(e)}, status=500)
-    return Response({'error': 'File not found'}, status=404)
-
-
 @api_view(['POST'])
 def test_parser(request):
     """
     Test a data rule against a PDF file.
     """
+    print("test_parser")
     parser_data = request.data.get('parser')
     if not parser_data:
         return Response({'error': 'Parser data is required'}, status=status.HTTP_400_BAD_REQUEST)
@@ -431,7 +344,7 @@ def test_parser(request):
         # Import the parser function dynamically
         from . import parsers
         parser_func = getattr(parsers, parser_method, None)
-
+        print("parser_func", parser_func)
         if not parser_func:
             return Response(
                 {'error': f'Parser method {parser_method} not found'},
@@ -440,19 +353,43 @@ def test_parser(request):
 
         # Run the parser
         result = parser_func(file_path)
+        # result = file_path
 
         # Convert pandas DataFrame to dict if needed
         if hasattr(result, 'to_dict'):
             result = result.to_dict('records')
 
+        if 'error' in result:
+            raise Exception(result['error'])
+
         return Response({
             'success': True,
+            'method': parser_method,
             'result': result
         })
 
     except Exception as e:
+        # Get the traceback information
+        tb = traceback.extract_tb(e.__traceback__)
+        if tb:
+            # Get the last frame where the error occurred
+            last_frame = tb[-1]
+            error_info = {
+                'error': str(e),
+                'line_number': last_frame.lineno,
+                'file': last_frame.filename,
+                'function': last_frame.name
+            }
+        else:
+            error_info = {
+                'error': str(e),
+                'line_number': 'unknown',
+                'file': 'unknown',
+                'function': 'unknown'
+            }
+
         return Response(
-            {'error': str(e)},
+            error_info,
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -468,7 +405,6 @@ class VendorViewSet(viewsets.ModelViewSet):
         """
         Update a vendor.
         """
-        obj = self.get_object()
         return super().update(request, *args, **kwargs)
 
     def get_queryset(self):

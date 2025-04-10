@@ -8,7 +8,7 @@ const nextPageToken = ref(null)
 const loading = ref(false)
 const showProcessingModal = ref(false)
 const currentInvoice = ref(null)
-const vendorID = ref('')
+const selectedVendor = ref('')
 const status = ref('')
 const pdfError = ref(null)
 const pdfLoading = ref(false)
@@ -30,11 +30,11 @@ const availableParsers = ref([])
 const currentParser = ref('')
 const selectedParser = ref('')
 
-// Watch for vendorID changes to update active vendor
-watch(vendorID, async (newVendorID) => {
-  console.log('vendorID changed', newVendorID)
-  if (newVendorID) {
-    const selectedVendor = vendors.value.find(v => v.value === newVendorID)
+// Watch for selectedVendor changes to update active vendor
+watch(selectedVendor, async (newSelectedVendor) => {
+  console.log('selectedVendor changed', newSelectedVendor)
+  if (newSelectedVendor) {
+    const selectedVendor = vendors.value.find(v => v.id === newSelectedVendor.id)
     if (selectedVendor) {
       activeVendor.value = selectedVendor
       // Load column mappings from vendor
@@ -124,8 +124,6 @@ async function fetchVendors() {
     // Add label and value props for v-select component
     vendors.value = data.map(vendor => ({
       ...vendor,
-      label: vendor.name,
-      value: vendor.id
     })) || []
   } catch (error) {
     console.error('Error fetching vendors:', error)
@@ -173,7 +171,7 @@ async function processEmail(email_id) {
       // Add to vendors list
       vendors.value.push(vendor)
     }
-    vendorID.value = vendor.value
+    selectedVendor.value = vendor
     status.value = data.status
     showProcessingModal.value = true
     tableData.value = data.invoice.tables
@@ -262,7 +260,11 @@ async function testParser() {
     if (data.error) {
       alert(`Error testing parser: ${data.error}`)
     } else {
-      alert(`Parser test result: ${JSON.stringify(data.result, null, 2)}`)
+      textData.value = JSON.stringify(data.result, null, 2)
+      console.log('data.result', data.result)
+      if (data.result.line_items?.length === 0) {
+        alert('No line items found in the invoice, please check the parser')
+      }
     }
   } catch (error) {
     console.error('Error testing parser:', error)
@@ -271,7 +273,7 @@ async function testParser() {
 }
 
 async function saveInvoiceConfig() {
-  if (!vendorID.value || !selectedParser.value) {
+  if (!selectedVendor.value || !selectedParser.value) {
     alert('Please select both a vendor and an invoice parser')
     return
   }
@@ -281,7 +283,7 @@ async function saveInvoiceConfig() {
       parser: selectedParser.value.method
     }
 
-    const response = await fetch(`http://localhost:8000/api/vendors/${vendorID.value}/`, {
+    const response = await fetch(`http://localhost:8000/api/vendors/${selectedVendor.value.id}/`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -468,8 +470,8 @@ onMounted(() => {
               <q-card-section class="q-py-sm">
                 <div class="text-h6">Invoice Parser</div>
               </q-card-section>
-              <q-card-section class="data-rules-card">
-                <div class="row">
+              <q-card-section class="column data-rules-card full-height">
+                <div class="col-auto">
                   <div class="col-12 q-mb-sm">
                     <q-input
                       v-model="currentInvoice.email"
@@ -479,45 +481,54 @@ onMounted(() => {
                     />
                   </div>
 
-                  <div class="col-6">
-                    <q-select
-                      v-model="vendorID"
-                      :clearable="false"
-                      :error="!vendorID"
-                      :options="vendors"
-                      :rules="[val => !!val || 'Please select a vendor']"
-                      behavior="dialog"
-                      class="q-mr-sm"
-                      dense outlined options-dense
-                      error-message="Please select a vendor"
-                      label="Vendor"
-                      option-label="name"
-                      option-value="id"
-                    />
+                  <div class="row">
+                    <div class="col-6">
+                      <q-select
+                        v-model="selectedVendor"
+                        :clearable="false"
+                        :error="!selectedVendor"
+                        :options="vendors"
+                        :rules="[val => !!val || 'Please select a vendor']"
+                        behavior="dialog"
+                        class="q-mr-sm"
+                        dense outlined options-dense
+                        error-message="Please select a vendor"
+                        label="Vendor"
+                        option-label="name"
+                        option-value="id"
+                      />
+                    </div>
+                    <div class="col-6">
+                      <q-select
+                        v-model="selectedParser"
+                        :clearable="false"
+                        :error="!selectedParser"
+                        :options="availableParsers"
+                        :rules="[val => !!val || 'Please select a parser']"
+                        dense options-dense outlined
+                        error-message="Please select a parser"
+                        label="Invoice Parser"
+                        option-label="name"
+                        option-value="method"
+                      />
+                    </div>
+                    <div class="col-12 justify-center flex q-mt-sm">
+                      <q-btn
+                        color="primary"
+                        icon="play_arrow"
+                        @click="testParser"
+                      >
+                        Test Parser
+                      </q-btn>
+                    </div>
                   </div>
-                  <div class="col-6">
-                    <q-select
-                      v-model="selectedParser"
-                      :clearable="false"
-                      :error="!selectedParser"
-                      :options="availableParsers"
-                      :rules="[val => !!val || 'Please select a parser']"
-                      dense options-dense outlined
-                      error-message="Please select a parser"
-                      label="Invoice Parser"
-                      option-label="name"
-                      option-value="method"
-                    />
-                  </div>
-                  <div class="col-12 justify-center flex q-mt-sm">
-                    <q-btn
-                      color="primary"
-                      icon="play_arrow"
-                      @click="testParser"
-                    >
-                      Test Parser
-                    </q-btn>
-                  </div>
+                </div>
+
+                <q-space class="col" />
+                <div class="col-auto q-pb-xl">
+                    <code>
+                      {{ textData }}
+                    </code>
                 </div>
               </q-card-section>
             </q-card>
@@ -688,6 +699,8 @@ onMounted(() => {
 }
 
 .data-rules-card {
+  // flex-flow: row wrap;
+
   .q-card__section {
     padding: 0;
   }
@@ -716,8 +729,6 @@ onMounted(() => {
 }
 
 
-.q-field--dense .q-field__control, .q-field--dense .q-field__marginal {
-    height: 36px;
-}
+
 
 </style>

@@ -4,11 +4,13 @@ import re
 import pymupdf as fitz
 from difflib import get_close_matches
 
+# These parsers are AI generated. Dont judge me, just use the prompt below to generate a new parser
+# for a new vendor or to fix a failing invoice. Each invoice is different, so we need custom parsers.
+# It helps to use multiple invoices from the same vendor to train the AI.
 
 # You're an expert in Python and PDF parsing using `pdfplumber`, `PyMuPDF`, and `Camelot`.
-
-# I need you to generate a custom parsing function for a vendor invoice. I will provide:
-# - The PDF file
+# I need you to generate a custom parsing function for a vendors PDF invoices. I will provide:
+# - One or more PDF invoices from the vendor
 # - Key fields I need extracted
 # - Notes about how the invoice is structured
 
@@ -17,18 +19,21 @@ from difflib import get_close_matches
 # - Uses `pdfplumber`, `PyMuPDF`, `Camelot` or all of the above to extract structured data
 # - Returns a `dict` or `DataFrame` with the extracted fields
 
+# Do not attempt to use any hard coded values from line items for matching.
 # Some fields are repeated across the document, so you will need to be careful to not duplicate them.
 # Some fields have a header above the value.
 # Methods need to be able to handle irregularly structured invoices.
-# Methods need to be able to handle invoices with multiple line items, possibly with multiple pages.
-# Each field has our column name and the text to search for in the PDF serparated by a colon.
+# Methods need to be able to handle invoices with 1 or more line items, possibly with multiple pages.
+# Test the parser with each invoice you are given to ensure it works correctly.
 
+
+# Each field has our column name and the text to match serparated by a colon.
 # Methods need to return these fields along with the line items
 # Key fields to extract:
 # - Invoice Number:Invoice #
 # - Ship Date:Ship Date
 # - Date Ordered:Date Ordered
-# - Vendor Name: Intermountain Wood Products
+# - Vendor Name: [Please attempt to extract the vendor name from the PDF]
 # - Invoice Total:Please Pay This Amount
 # - Invoice Due Date: Payment Due By
 # - Cust PO: Order Name:
@@ -591,38 +596,24 @@ def extract_line_items_from_hafele_invoice_fallback(pdf_path):
     return pd.DataFrame(line_items)
 
 
-def extract_sierra_invoice_data(pdf_path):
-    """
-    Extracts structured invoice data from Sierra Forest Products PDFs.
-    Supports multi-line line items and irregular layout structure.
 
-    Returns:
-        dict: {
-            invoice_number,
-            ship_date,
-            vendor_name,
-            invoice_total,
-            invoice_due_date,
-            invoice_amount,
-            cust_po,
-            line_items: [ {Id, Description, Qty, Unit, Total_Price}, ... ]
-        }
-    """
+def extract_sierra_invoice_data(pdf_path):
     doc = fitz.open(pdf_path)
-    lines = "\n".join([page.get_text() for page in doc]).splitlines()
+    text = "\n".join(page.get_text() for page in doc)
+    lines = text.splitlines()
 
     result = {
         "invoice_number": None,
         "ship_date": None,
+        "date_ordered": None,
         "vendor_name": "Sierra Forest Products, Inc.",
         "invoice_total": None,
         "invoice_due_date": None,
-        "invoice_amount": None,
         "cust_po": None,
         "line_items": []
     }
 
-    # --- Extract header-level fields ---
+    # --- Extract Header-Level Fields ---
     for i, line in enumerate(lines):
         if not result["invoice_number"]:
             match = re.search(r"Invoice[#\s]*([A-Z0-9-]+)", line)
@@ -630,55 +621,52 @@ def extract_sierra_invoice_data(pdf_path):
                 result["invoice_number"] = match.group(1)
 
         if not result["ship_date"] and "Ship Date" in line:
-            if i > 0:
-                date_match = re.search(r"\d{2}/\d{2}/\d{4}", lines[i - 1])
-                if date_match:
-                    result["ship_date"] = date_match.group(0)
+            date_matches = re.findall(r"\d{2}/\d{2}/\d{4}", line)
+            if date_matches:
+                result["ship_date"] = date_matches[0]
 
-        if not result["invoice_due_date"] and "paid by" in line.lower():
-            match = re.search(r"(\d{2}/\d{2}/\d{4})", line)
+        if not result["date_ordered"] and "Order Date" in line:
+            for offset in range(1, 3):
+                if i + offset < len(lines):
+                    match = re.search(r"\d{2}/\d{2}/\d{4}", lines[i + offset])
+                    if match:
+                        result["date_ordered"] = match.group(0)
+                        break
+
+        if not result["invoice_due_date"]:
+            match = re.search(r"paid by\s+(\d{2}/\d{2}/\d{4})", line.lower())
             if match:
                 result["invoice_due_date"] = match.group(1)
 
-        if not result["invoice_total"] and line.strip().upper() == "TOTAL":
-            if i + 1 < len(lines):
-                result["invoice_total"] = lines[i + 1].strip()
-
-        if not result["invoice_amount"]:
-            match = re.match(r"^\d{1,3}(,\d{3})*\.\d{2}$", line.strip())
-            if match:
-                amt = match.group(0).replace(",", "")
-                if float(amt) > 100:  # Avoid zero or filler amounts
-                    result["invoice_amount"] = amt
-
         if not result["cust_po"] and "Cust. P.O." in line:
-            if i + 1 < len(lines):
-                result["cust_po"] = lines[i + 1].strip()
+            result["cust_po"] = lines[i + 1].strip() if i + 1 < len(lines) else None
 
-    # --- Extract line items (10-line repeating blocks) ---
-    i = 0
-    while i < len(lines) - 9:
-        if re.search(r'G2S PB', lines[i]):
-            try:
-                description = lines[i].strip()
-                ext_price = lines[i + 2].strip().replace(",", "")
-                qty = lines[i + 3].strip()
-                unit_price = lines[i + 4].strip()
-                item_code = lines[i + 8].strip()
+        if not result["invoice_total"] and line.strip().upper() == "TOTAL":
+            for j in range(i + 1, len(lines)):
+                amt_match = re.search(r"\d{1,3}(?:,\d{3})*\.\d{2}", lines[j])
+                if amt_match:
+                    result["invoice_total"] = amt_match.group(0)
+                    break
 
-                if re.match(r'^\d{5,}$', item_code):
-                    result["line_items"].append({
-                        "Id": item_code,
-                        "Description": description,
-                        "Qty": qty,
-                        "Unit": unit_price,
-                        "Total_Price": ext_price
-                    })
-                i += 10  # Skip ahead to next item
-            except Exception:
-                i += 1
-        else:
-            i += 1
+    # --- New Logic for Parsing Line Items ---
+    for line in lines:
+        # Try to extract values from lines with prices and item codes
+        match = re.match(
+            r'^(.+?)\s+(\d{1,3}(?:,\d{3})*\.\d{2})\s+(\d+)\s+(\d{1,3}(?:,\d{3})*\.\d{2})\s+\d+\s+/(\d+)$',
+            line.strip()
+        )
+        if match:
+            description, total_price, qty, unit_price, item_id = match.groups()
+            result["line_items"].append({
+                "Id": item_id,
+                "Name": "Item",
+                "Description": description.strip(),
+                "Qty": qty,
+                "Unit": "",  # Unit (e.g., "PC") is hard to isolate in this format
+                "Unit_Price": unit_price,
+                "Total_Price": total_price
+            })
 
     return result
+
 extract_sierra_invoice_data.name = "Sierra Forest Products"
