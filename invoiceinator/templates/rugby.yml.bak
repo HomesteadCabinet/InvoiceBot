@@ -1,42 +1,31 @@
-issuer: "Rugby ABP - Salt Lake City"
-required:
-  - invoice_number
-  - issuer
+issuer: "Sierra Forest Products, Inc."
 keywords:
-  - "Rugby ABP - Salt Lake City"
-  - "INVOICE"
+  - "Sierra Forest Products, Inc."
+
 fields:
   invoice_number:
-    parser: regex
-    regex: "(\d{10}-\d{3})"
-  date:
-    parser: regex
-    regex: "Invoice Date:\s*(\d{2}/\d{2}/\d{2})"
-    type: date
-    date_formats:
-      - "%m/%d/%y"
-  amount:
-    parser: regex
-    regex: "Subtotal\s+([\d\s,]+\.\d{2})"
-    type: float
-  due_date:
-    parser: regex
-    regex: "Due Date:\s*(\d{2}/\d{2}/\d{2})"
-    type: date
-    date_formats:
-      - "%m/%d/%y"
-lines:
-  - start: "SECURITY ALERT:"
-    end: "Subtotal"
-    first_line: "^\s*\d+\s+\d+.*?(SH|ROLL).*?$"
-    line:
-      regex: "(?P<qty>\d+)\s+(?P<shipped>\d+)\s+.*?(?P<uom>SH|ROLL)\s+(?P<sku>[A-Z0-9]+)\s+.*?(?P<unit_price>\d[\d\s,.]*)/\s*(?P=uom).*?(?P<amount>\d[\d\s,.]*)"
-      fields:
-        - qty
-        - shipped
-        - uom
-        - sku
-        - unit_price
-        - amount
-options:
-  currency: "USD"
+    required: true
+    regex: "Invoice\\s*(No\\.|#)\\s*(L\\d+)"
+  ship_date:
+    regex: "Ship Date\\s*(\\d{1,2}/\\d{1,2}/\\d{4})"
+  date_ordered:
+    regex: "Inv Date\\s*(\\d{1,2}/\\d{1,2}/\\d{4})"
+  invoice_due_date:
+    regex: "if paid by\\s*(\\d{1,2}/\\d{1,2}/\\d{4})"
+  invoice_total:
+    regex: "Total\\s*([\\d,]+\\.\\d{2})"
+  cust_po:
+    regex: "Cust\\.\\s*P\\.O\\.\\s*#\\s*(.+)"
+
+line_items:
+  # In invoice2data you can specify a start pattern;
+  # here we assume that the line items block starts near the text "Code" in the table header.
+  start: "(?i)^Code"
+  # The columns are defined in order. For example, we assume your table columns are:
+  # [Description, Ordered, Unit Price, unused, Code]
+  columns:
+    - description
+    - qty
+    - unit_price
+    - _
+    - id
