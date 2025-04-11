@@ -1,0 +1,47 @@
+issuer: "Sierra Forest Products, Inc."
+keywords:
+  - "Sierra"
+
+# Exclude keywords (if needed, for example, to avoid already‑paid invoices)
+exclude_keywords:
+  - "Already paid"
+
+fields:
+  invoice_number:
+    parser: regex
+    regex: "Invoice\\s*(?:No\\.|#)\\s*(L\\d+)"
+  date:
+    parser: regex
+    regex: "Inv\\s*Date\\s*(\\d{1,2}/\\d{1,2}/\\d{4})"
+    type: date
+  amount:
+    parser: regex
+    regex: "TOTAL\\s*([\\d,]+\\.\\d{2})"
+    type: float
+  issuer:
+    parser: static
+    value: "Sierra Forest Products, Inc."
+  cust_po:
+    parser: regex
+    regex: "Cust\\.\\s*P\\.O\\.\\s*#\\s*(.+)"
+  ship_date:
+    parser: regex
+    regex: "Ship\\s*Date\\s*(\\d{1,2}/\\d{1,2}/\\d{4})"
+    type: date
+  invoice_due_date:
+    parser: regex
+    regex: "Inv Date\\s*(\\d{1,2}/\\d{1,2}/\\d{4})"
+    type: date
+
+options:
+  remove_whitespace: true
+  currency: "USD"
+  date_formats:
+    - "%m/%d/%Y"
+
+lines:
+  parser: lines
+  start: "(?i)^Code\\s+Ordered"
+  end: "^\\s*$"
+  skip_line: "^\\s*TSCA VI Compliant"
+  line: "^(?P<id>\\d+)\\s+(?P<qty>\\d+)\\s+\\d+\\s+\\d+\\s+(?P<description>.+?)\\s+(?P<unit_price>[\\d.,/\\s]+)\\s+(?P<total_price>[\\d,]+\\.\\d{2})"
