@@ -8,10 +8,18 @@ from .serializers import VendorSerializer
 from django.conf import settings
 import os
 from datetime import datetime
+import logging
 import time
 import re
 import base64
 import traceback
+
+logger = logging.getLogger(__name__)
+
+GMAIL_INVOICE_QUERY = 'has:attachment invoice'
+MAX_EMAIL_PAGE_SIZE = 100
+DEFAULT_EMAIL_PAGE_SIZE = 20
+MAX_FILTER_BACKFILL_PAGES = 5
 
 # Store temporary files with their creation time
 temp_files = {}
@@ -31,33 +39,32 @@ SPECIAL_EMAIL_DOMAINS = [
 
 def get_module_functions(module_path):
     """
-    Get a list of all function names defined in a Python module.
+    Return vendor parser callables from a parser module file (not internal helpers).
 
-    Args:
-        module_path (str): Path to the Python module
-
-    Returns:
-        list: List of function names
+    Only functions named parse_* that define a display ``.name`` attribute
+    (e.g. ``parse_sierra_invoice.name = "Sierra Forest Products"``) are included.
     """
     import importlib.util
     import inspect
 
-    # Get the module name from the file path
     module_name = os.path.splitext(os.path.basename(module_path))[0]
 
-    # Load the module
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    # Get all functions
     functions = []
     for name, obj in inspect.getmembers(module):
-        if inspect.isfunction(obj) and obj.__module__ == module_name:
-            # Use obj.name if it exists, otherwise use name
-            functions.append({'method': name, 'name': getattr(obj, 'name', name)})
+        if not inspect.isfunction(obj) or obj.__module__ != module_name:
+            continue
+        if not name.startswith("parse_"):
+            continue
+        display_name = getattr(obj, "name", None)
+        if not display_name or not isinstance(display_name, str):
+            continue
+        functions.append({"method": name, "name": display_name})
 
-    return functions
+    return sorted(functions, key=lambda entry: entry["name"].lower())
 
 
 def cleanup_temp_files():
@@ -74,102 +81,222 @@ def cleanup_temp_files():
 
 
 
+def _extract_sender_email(from_header):
+    if not from_header:
+        return None
+    email_match = re.search(r'<(.+?)>|([^<\s]+@[^>\s]+)', from_header)
+    if not email_match:
+        return None
+    return email_match.group(1) or email_match.group(2)
+
+
+def _vendor_name_from_sender(from_header, sender_email):
+    if not sender_email:
+        return None
+    if any(sender_email.endswith(f'@{domain}') for domain in SPECIAL_EMAIL_DOMAINS):
+        name_match = re.search(r'^(.+?)\s*<', from_header or '')
+        if name_match:
+            return name_match.group(1).strip()
+    domain_match = re.search(r'@(.+?)\.[^.]+$', sender_email)
+    return domain_match.group(1).title() if domain_match else "Unknown"
+
+
+def _sync_vendor_for_sender(from_header, sender_email):
+    vendor_name = _vendor_name_from_sender(from_header, sender_email)
+    if not vendor_name:
+        return vendor_name, None
+    try:
+        vendor, _created = Vendor.objects.update_or_create(
+            name=vendor_name,
+            defaults={'invoice_type': 'pdf'},
+        )
+        VendorEmail.objects.update_or_create(
+            email=sender_email,
+            defaults={'vendor': vendor, 'is_primary': True},
+        )
+        return vendor_name, vendor.id
+    except Exception as exc:
+        logger.exception("Error creating/updating vendor for %s", sender_email)
+        return vendor_name, None
+
+
+def _gmail_date_token(iso_date):
+    """Convert YYYY-MM-DD to Gmail after:/before: token (YYYY/MM/DD)."""
+    if not iso_date:
+        return None
+    try:
+        parsed = datetime.strptime(iso_date[:10], '%Y-%m-%d')
+    except ValueError:
+        return None
+    return parsed.strftime('%Y/%m/%d')
+
+
+def _build_gmail_list_query(search, vendor_id, date_from, date_to):
+    parts = [GMAIL_INVOICE_QUERY]
+    if search:
+        parts.append(search)
+    if vendor_id:
+        vendor_emails = list(
+            VendorEmail.objects.filter(vendor_id=vendor_id).values_list('email', flat=True)
+        )
+        if vendor_emails:
+            from_parts = [f'from:{email}' for email in vendor_emails]
+            parts.append(f"({' OR '.join(from_parts)})")
+    after = _gmail_date_token(date_from)
+    before = _gmail_date_token(date_to)
+    if after:
+        parts.append(f'after:{after}')
+    if before:
+        parts.append(f'before:{before}')
+    return ' '.join(parts)
+
+
+def _normalized_email_status(processed):
+    if processed is None:
+        return 'pending'
+    return processed.status or 'pending'
+
+
+def _email_matches_status(processed, status_filter):
+    if not status_filter:
+        return True
+    return _normalized_email_status(processed) == status_filter
+
+
+def _email_matches_search(item, search):
+    if not search:
+        return True
+    needle = search.lower()
+    haystacks = (
+        item.get('snippet') or '',
+        item.get('from') or '',
+        item.get('vendor_name') or '',
+    )
+    return any(needle in value.lower() for value in haystacks)
+
+
+def _email_matches_vendor_id(item_vendor_id, vendor_id_filter):
+    if not vendor_id_filter:
+        return True
+    try:
+        wanted = int(vendor_id_filter)
+    except (TypeError, ValueError):
+        return True
+    return item_vendor_id == wanted
+
+
+def _serialize_list_email(service, message_id, processed=None):
+    email = service.users().messages().get(userId='me', id=message_id).execute()
+    attachment_count = 0
+    if 'payload' in email and 'parts' in email['payload']:
+        attachment_count = sum(
+            1 for part in email['payload']['parts'] if part.get('filename')
+        )
+
+    headers = email['payload'].get('headers', [])
+    from_header = next(
+        (header['value'] for header in headers if header['name'].lower() == 'from'),
+        None,
+    )
+    date_header = next(
+        (header['value'] for header in headers if header['name'].lower() == 'date'),
+        None,
+    )
+
+    sender_email = _extract_sender_email(from_header)
+    vendor_name = None
+    inferred_vendor_id = None
+    if sender_email:
+        vendor_name, inferred_vendor_id = _sync_vendor_for_sender(from_header, sender_email)
+
+    if processed is None:
+        processed = (
+            ProcessedEmail.objects.filter(email_id=message_id).select_related('vendor').first()
+        )
+    vendor_id = processed.vendor_id if processed and processed.vendor_id else inferred_vendor_id
+    if processed and processed.vendor:
+        vendor_name = processed.vendor.name
+
+    return {
+        'id': message_id,
+        'snippet': email.get('snippet', ''),
+        'attachment_count': attachment_count,
+        'from': from_header,
+        'date': date_header,
+        'message_data': processed.data if processed else None,
+        'status': _normalized_email_status(processed),
+        'vendor_name': vendor_name,
+        'vendor_id': vendor_id,
+    }
+
+
 @api_view(['GET'])
 def list_invoice_emails(request):
     service = get_gmail_service()
-    page_token = request.GET.get('pageToken')
-    max_results = int(request.GET.get('maxResults', 100))  # Default to 100 if not specified
+    page_token = request.GET.get('pageToken') or None
+    try:
+        page_size = int(request.GET.get('maxResults', DEFAULT_EMAIL_PAGE_SIZE))
+    except (TypeError, ValueError):
+        page_size = DEFAULT_EMAIL_PAGE_SIZE
+    page_size = max(1, min(page_size, MAX_EMAIL_PAGE_SIZE))
 
-    # Get messages with pagination
-    results = service.users().messages().list(
-        userId='me',
-        q='has:attachment invoice',
-        maxResults=max_results,
-        pageToken=page_token
-    ).execute()
+    status_filter = (request.GET.get('status') or '').strip().lower() or None
+    if status_filter and status_filter not in {'pending', 'processed', 'error'}:
+        return Response({'error': f'Invalid status: {status_filter}'}, status=400)
 
-    messages = results.get('messages', [])
-    next_page_token = results.get('nextPageToken')
+    vendor_id = (request.GET.get('vendorId') or '').strip() or None
+    search = (request.GET.get('search') or '').strip() or None
+    date_from = (request.GET.get('dateFrom') or '').strip() or None
+    date_to = (request.GET.get('dateTo') or '').strip() or None
+
+    gmail_query = _build_gmail_list_query(search, vendor_id, date_from, date_to)
+    needs_post_filter = bool(status_filter or search or vendor_id)
+
     emails = []
+    next_page_token = page_token
+    gmail_fetch_token = page_token
+    backfill_pages = 0
 
-    # Check if we're on the first page and have more than 12 records
-    if not page_token and len(messages) > max_results:
-        return Response({'error': f'Too many records. Maximum allowed is {max_results}.'}, status=400)
+    while len(emails) < page_size and backfill_pages < MAX_FILTER_BACKFILL_PAGES:
+        results = service.users().messages().list(
+            userId='me',
+            q=gmail_query,
+            maxResults=page_size,
+            pageToken=gmail_fetch_token,
+        ).execute()
 
-    for msg in messages:
-        email = service.users().messages().get(userId='me', id=msg['id']).execute()
-        # Count attachments
-        attachment_count = 0
-        if 'payload' in email and 'parts' in email['payload']:
-            attachment_count = sum(1 for part in email['payload']['parts'] if part.get('filename'))
+        messages = results.get('messages', [])
+        next_page_token = results.get('nextPageToken')
+        gmail_fetch_token = next_page_token
 
-        # Extract 'from' field from headers
-        from_header = next((header['value'] for header in email['payload']['headers'] if header['name'].lower() == 'from'), None)
-        date_header = next((header['value'] for header in email['payload']['headers'] if header['name'].lower() == 'date'), None)
+        for msg in messages:
+            processed = None
+            if status_filter:
+                processed = ProcessedEmail.objects.filter(email_id=msg['id']).first()
+                if not _email_matches_status(processed, status_filter):
+                    continue
 
-        # Try to find matching vendor based on sender email
-        vendor_name = None
-        if from_header:
-            # Extract email address from the from_header (handles both "Name <email@domain.com>" and "email@domain.com" formats)
-            email_match = re.search(r'<(.+?)>|([^<\s]+@[^>\s]+)', from_header)
-            if email_match:
-                sender_email = email_match.group(1) or email_match.group(2)
+            item = _serialize_list_email(service, msg['id'], processed=processed)
+            if search and not _email_matches_search(item, search):
+                continue
+            if vendor_id and not _email_matches_vendor_id(item.get('vendor_id'), vendor_id):
+                continue
 
-                # Special handling for emails from specific domains
-                if any(sender_email.endswith(f'@{domain}') for domain in SPECIAL_EMAIL_DOMAINS):
-                    # Extract the name before the email address
-                    name_match = re.search(r'^(.+?)\s*<', from_header)
-                    if name_match:
-                        vendor_name = name_match.group(1).strip()
-                    else:
-                        # Fallback to domain-based name if no name found
-                        domain_match = re.search(r'@(.+?)\.[^.]+$', sender_email)
-                        vendor_name = domain_match.group(1).title() if domain_match else "Unknown"
-                else:
-                    # Original domain-based name extraction for other emails
-                    domain_match = re.search(r'@(.+?)\.[^.]+$', sender_email)
-                    vendor_name = domain_match.group(1).title() if domain_match else "Unknown"
+            emails.append(item)
+            if len(emails) >= page_size:
+                break
 
-                try:
-                    # Create or update vendor
-                    vendor, created = Vendor.objects.update_or_create(
-                        name=vendor_name,
-                        defaults={
-                            'invoice_type': 'pdf'  # Default to PDF, can be updated later
-                        }
-                    )
-
-                    # Create or update vendor email
-                    VendorEmail.objects.update_or_create(
-                        email=sender_email,
-                        defaults={
-                            'vendor': vendor,
-                            'is_primary': True
-                        }
-                    )
-                except Exception as e:
-                    errors.append(f"Error creating/updating vendor: {str(e)}")
-
-        obj = ProcessedEmail.objects.filter(email_id=msg['id']).first()
-        if obj:
-            status = obj.status
-        else:
-            status = None
-
-        emails.append({
-            'id': msg['id'],
-            'snippet': email['snippet'],
-            'attachment_count': attachment_count,
-            'from': from_header,
-            'date': date_header,
-            'message_data': obj.data if obj else None,
-            'status': status,
-            'vendor_name': vendor_name
-        })
+        backfill_pages += 1
+        if len(emails) >= page_size or not next_page_token:
+            break
+        if not needs_post_filter:
+            break
 
     return Response({
-        'emails': emails,
-        'nextPageToken': next_page_token
+        'emails': emails[:page_size],
+        'nextPageToken': next_page_token,
+        'pageSize': page_size,
+        'hasMore': bool(next_page_token),
     })
 
 
@@ -351,15 +478,16 @@ def test_parser(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Run the parser
+        # Run the parser and coerce to the standard invoice schema
+        from .parsers import normalize_parser_output
+
         result = parser_func(file_path)
-        # result = file_path
+        result = normalize_parser_output(
+            result,
+            vendor_name=getattr(parser_func, 'name', None),
+        )
 
-        # Convert pandas DataFrame to dict if needed
-        if hasattr(result, 'to_dict'):
-            result = result.to_dict('records')
-
-        if 'error' in result:
+        if isinstance(result, dict) and 'error' in result:
             raise Exception(result['error'])
 
         return Response({
@@ -420,11 +548,12 @@ class VendorViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def get_invoice_parsers(self, request):
         """
-        Get a list of available parser methods from parsers.py
+        Get a list of available parser methods from the parsers package.
         """
         try:
-            parsers_path = os.path.join(os.path.dirname(__file__), 'parsers.py')
-            available_parsers = get_module_functions(parsers_path)
+            from .parsers import list_invoice_parsers
+
+            available_parsers = list_invoice_parsers()
             return Response({
                 'available_parsers': available_parsers,
             })

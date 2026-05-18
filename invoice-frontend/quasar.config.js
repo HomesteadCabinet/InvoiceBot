@@ -72,7 +72,13 @@ export default defineConfig((/* ctx */) => {
     // Full list of options: https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#devserver
     devServer: {
       // https: true,
-      open: true // opens browser window automatically
+      open: true, // opens browser window automatically
+      proxy: {
+        '/api':    { target: 'http://localhost:9999', changeOrigin: true },
+        '/media':  { target: 'http://localhost:9999', changeOrigin: true },
+        '/admin':  { target: 'http://localhost:9999', changeOrigin: true },
+        '/static': { target: 'http://localhost:9999', changeOrigin: true }
+      }
     },
 
     // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#framework

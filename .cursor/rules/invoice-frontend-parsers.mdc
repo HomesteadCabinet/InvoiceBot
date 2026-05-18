@@ -1,0 +1,21 @@
+---
+description: Frontend display of parsed invoice / test-parser results
+globs: invoice-frontend/src/components/InvoiceList.vue
+alwaysApply: false
+---
+
+# Parser results UI
+
+## Data shape
+
+Test Parser API `result` is always `{ vendor_name, invoices: [...] }` (one invoice for single-page PDFs). `parserResultInvoices(result)` returns `result.invoices`; `parsedInvoice` is the tab-selected entry. Multiple invoices show `q-tabs` keyed by `invoice_number`.
+
+## Formatting numbers
+
+- Use `formatLineItemField(item, field)` for line item rows (supports `altKey`, e.g. length → height).
+- Dimensions: integers as-is; fractional values up to 4 decimals with trailing zeros removed (`parseFloat(value.toFixed(4))`).
+- Money fields: 2 decimal places.
+
+## API calls
+
+Use `postAPI` / `putAPI` from `src/utils/api.js` — no hardcoded `localhost:8000` URLs (Vite proxies `/api` to Django in dev).

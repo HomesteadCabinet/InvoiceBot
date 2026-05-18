@@ -1,0 +1,73 @@
+---
+description: Invoice PDF parser schema, helpers, and conventions (invoiceinator)
+globs: invoiceinator/invoices/parsers/**,invoiceinator/test/test_parsers.py
+alwaysApply: false
+---
+
+# Invoice parser conventions
+
+## Standard output
+
+`parse_*_invoice(pdf_path)` may return a single invoice dict or `invoice_bundle(vendor, [...])` (Wurth). **Always** run through `normalize_parser_output()` before the API or tests — it produces the standard envelope:
+
+```python
+{"vendor_name": "...", "invoices": [<invoice>, ...]}  # length 1 for typical PDFs
+```
+
+Each invoice in `invoices`: `invoice_number`, `ship_date`, `date_ordered`, `vendor_name`, `invoice_total`, `invoice_due_date`, `cust_po`, `line_items`
+
+Each line item must include: `id`, `name`, `description`, `qty`, `unit`, `unit_price`, `total_price`, `width`, `length`, `height`.
+
+Build items with `make_line_item(...)` — do not hand-roll dicts. Set display name on the function: `parse_foo_invoice.name = "Vendor Name"`.
+
+## Dimensions
+
+- `length` and `height` are the **same** second panel dimension; keep both in sync in `make_line_item`.
+- Explicit columns (e.g. Allmoxy Width/Height) → pass into `make_line_item`.
+- Otherwise dimensions are parsed from `name`/`description` via `extract_panel_dimensions()` (`48.5" x 120.5"`, `4'x8'`, etc.).
+- Fractional inches (e.g. `19 3/8`) → use `_parse_fractional_inches()` or `normalize_dimension()`.
+- **Always** run inch measurements through `normalize_dimension()`: round to 4 decimals, strip trailing zeros (`14.0` → `14`).
+
+```python
+# ✅ GOOD
+make_line_item(
+    item_id="1 01",
+    name=section_name,
+    qty="2",
+    width=_parse_fractional_inches("19 3/8"),
+    length=_parse_fractional_inches("49 7/8"),
+    height=_parse_fractional_inches("49 7/8"),
+    unit_price=81.85,
+    total_price=163.70,
+)
+
+# ❌ BAD — missing height alias, raw float from division
+{"width": 19.3750000001, "length": 49.875}
+```
+
+## Package layout (`invoiceinator/invoices/parsers/`)
+
+| Module | Role |
+|--------|------|
+| `schema.py` | `empty_invoice`, `make_line_item`, `normalize_invoice`, `normalize_parser_output`, `invoice_bundle` |
+| `pdf.py` | `pdf_lines`, `pdf_text`, `value_after` |
+| `stacked.py` | Stacked qty/UM blocks (Industrial Tool, etc.) |
+| `camelot_tables.py` | Camelot code-table fallback |
+| `allmoxy_common.py` / `sierra_common.py` | Shared vendor-specific line-item logic |
+| `<vendor>.py` | One `parse_<vendor>_invoice` per file; set `.name` |
+
+Register new parsers in `parsers/__init__.py` (`_PARSER_FUNCTIONS`).
+
+## New parser checklist
+
+1. Add `parse_<vendor>_invoice` in `parsers/<vendor>.py` using `pdf_lines` / `pdf_text` first; Camelot only when tables are reliable.
+2. Map test PDF in `invoiceinator/test/test_parsers.py` → `PDF_PARSER_MAP`.
+3. Run `python test/test_parsers.py` from `invoiceinator/`.
+4. Prefer shared helpers (`_parse_allmoxy_style_line_items`, `_parse_sierra_stacked_line_items`, `stacked.py`, etc.) over duplicating logic.
+
+## Allmoxy / stacked PDF text
+
+- **Vendor name**: read the first company line after `Invoice #` and before `Bill To:` (e.g. Lewis Cabinet Specialties Group LLC, Salt City Mill). Skip phone/address/`United States` lines. If the PDF has no seller block, `vendor_name` stays `Allmoxy`.
+- Table header row may be split across lines; scan until `Price` / `Total`, not a fixed header set.
+- Item IDs match `^\d+\s+\d{2}$` (e.g. `1 01`). Note lines (`Lites Wide:`, `Product Description:`) are not items.
+- Amounts: `^\$[\d,]+(?:\.\d{1,2})?$` (accepts `$0.0` and `$0.00`).

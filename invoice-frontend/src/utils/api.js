@@ -46,3 +46,11 @@ export async function patchAPI(endpoint, data, options = {}) {
     ...options
   })
 }
+
+export async function putAPI(endpoint, data, options = {}) {
+  return fetchAPI(endpoint, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+    ...options
+  })
+}
