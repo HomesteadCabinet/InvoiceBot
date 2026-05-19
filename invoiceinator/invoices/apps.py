@@ -6,6 +6,8 @@ class InvoicesConfig(AppConfig):
     name = 'invoices'
 
     def ready(self):
+        from . import signals  # noqa: F401
+
         import os
         if os.environ.get('RUN_MAIN') != 'true':
             return

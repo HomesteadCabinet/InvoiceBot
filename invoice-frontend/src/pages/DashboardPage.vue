@@ -18,6 +18,7 @@
         <q-tab name="items" icon="inventory_2" label="Items" />
         <q-tab name="item-types" icon="category" label="Item Types" />
         <q-tab name="contacts" icon="contacts" label="Contacts" />
+        <q-tab name="jobs" icon="work" label="Jobs" />
       </q-tabs>
 
       <q-separator />
@@ -126,6 +127,18 @@
             create-label="Add contact"
           />
         </q-tab-panel>
+
+        <q-tab-panel name="jobs">
+          <CrudManager
+            title="Jobs"
+            subtitle="Jobs group line items by project or customer PO name from invoices."
+            endpoint="/api/jobs/"
+            :columns="jobColumns"
+            :fields="jobFields"
+            :default-record="jobDefaults"
+            create-label="Add job"
+          />
+        </q-tab-panel>
       </q-tab-panels>
     </q-card>
   </q-page>
@@ -145,6 +158,7 @@ const oauthStatus = new URLSearchParams(window.location.search).get('googleAuth'
 const vendors = ref([])
 const itemTypes = ref([])
 const contacts = ref([])
+const jobs = ref([])
 const invoices = ref([])
 const inventoryItems = ref([])
 const lineItems = ref([])
@@ -156,6 +170,7 @@ const summaryCards = computed(() => [
   { label: 'Inventory Items', value: inventoryItems.value.length, icon: 'inventory_2', color: 'accent' },
   { label: 'Line Items', value: lineItems.value.length, icon: 'view_list', color: 'warning' },
   { label: 'Contacts', value: contacts.value.length, icon: 'contacts', color: 'positive' },
+  { label: 'Jobs', value: jobs.value.length, icon: 'work', color: 'info' },
 ])
 
 const vendorColumns = [
@@ -193,6 +208,20 @@ const contactColumns = [
   { name: 'phone', label: 'Phone', field: 'phone', align: 'left' },
   { name: 'actions', label: '', field: 'actions', align: 'right' },
 ]
+
+const jobColumns = [
+  { name: 'job_id', label: 'Job ID', field: 'job_id', align: 'left', sortable: true },
+  { name: 'name', label: 'Name', field: 'name', align: 'left', sortable: true },
+  { name: 'vendor_name', label: 'Vendor', field: 'vendor_name', align: 'left' },
+  { name: 'actions', label: '', field: 'actions', align: 'right' },
+]
+
+const jobFields = computed(() => [
+  { key: 'vendor', label: 'Vendor', type: 'select', options: vendorOptions.value, clearable: true },
+  { key: 'job_id', label: 'Job ID', type: 'text' },
+  { key: 'name', label: 'Name', type: 'text' },
+  { key: 'notes', label: 'Notes', type: 'textarea', colClass: 'col-12' },
+])
 
 const contactFields = computed(() => [
   { key: 'vendor', label: 'Vendor', type: 'select', options: vendorOptions.value, clearable: true },
@@ -259,8 +288,12 @@ const invoiceFields = computed(() => [
 
 const lineItemColumns = [
   { name: 'invoice_number', label: 'Invoice', field: 'invoice_number', align: 'left' },
+  { name: 'vendor_name', label: 'Vendor', field: 'vendor_name', align: 'left' },
+  { name: 'invoice_date', label: 'Date', field: 'invoice_date', align: 'left' },
   { name: 'item_type_name', label: 'Type', field: 'item_type_name', align: 'left' },
   { name: 'inventory_item_name', label: 'Inventory Item', field: 'inventory_item_name', align: 'left' },
+  { name: 'job_number', label: 'Job ID', field: 'job_number', align: 'left' },
+  { name: 'job_name', label: 'Job Name', field: 'job_name', align: 'left' },
   { name: 'name', label: 'Name', field: 'name', align: 'left' },
   { name: 'qty', label: 'Qty', field: 'qty', align: 'right' },
   { name: 'total_price', label: 'Total', field: 'total_price', align: 'right' },
@@ -272,6 +305,7 @@ const lineItemFields = computed(() => [
   { key: 'item_type', label: 'Item Type', type: 'select', options: itemTypeOptions.value, clearable: true },
   { key: 'inventory_item', label: 'Inventory Item', type: 'select', options: inventoryOptions.value, clearable: true },
   { key: 'item_id', label: 'Item ID', type: 'text' },
+  { key: 'job', label: 'Job', type: 'select', options: jobOptions.value, clearable: true },
   { key: 'name', label: 'Name', type: 'text' },
   { key: 'description', label: 'Description', type: 'textarea', colClass: 'col-12' },
   { key: 'qty', label: 'Qty', type: 'number' },
@@ -285,16 +319,26 @@ const lineItemFields = computed(() => [
 
 const vendorDefaults = { name: '', invoice_type: 'pdf', parser: '', spreadsheet_column_mapping: {} }
 const itemTypeDefaults = { name: '', description: '', color: '' }
+const jobDefaults = { vendor: null, job_id: '', name: '', notes: '' }
 const contactDefaults = { vendor: null, name: '', email: '', phone: '', title: '', is_primary: false, notes: '' }
 const inventoryDefaults = { vendor: null, item_type: null, item_key: '', item_id: '', name: '', description: '', unit: '', current_qty: 0, last_unit_price: null, last_total_price: null }
 const invoiceDefaults = { vendor: null, contact: null, source_email_id: '', source_email_subject: '', source_email_from: '', source_email_date: '', received_at: '', invoice_number: '', invoice_date: '', ship_date: '', due_date: '', customer_po: '', invoice_total: null, status: 'pending', error_message: '' }
-const lineItemDefaults = { invoice: null, item_type: null, inventory_item: null, item_id: '', name: '', description: '', qty: 0, unit: '', unit_price: 0, total_price: 0, width: null, length: null, height: null }
+const lineItemDefaults = { invoice: null, item_type: null, inventory_item: null, job: null, item_id: '', name: '', description: '', qty: 0, unit: '', unit_price: 0, total_price: 0, width: null, length: null, height: null }
 
 const vendorOptions = computed(() => vendors.value.map(v => ({ label: v.name, value: v.id })))
 const itemTypeOptions = computed(() => itemTypes.value.map(t => ({ label: t.name, value: t.id })))
 const contactOptions = computed(() => contacts.value.map(c => ({ label: `${c.name}${c.vendor_name ? ` • ${c.vendor_name}` : ''}`, value: c.id })))
 const invoiceOptions = computed(() => invoices.value.map(i => ({ label: `${i.invoice_number || i.id} • ${i.vendor_name || 'No vendor'}`, value: i.id })))
 const inventoryOptions = computed(() => inventoryItems.value.map(i => ({ label: `${i.name || i.item_key} • ${i.vendor_name || 'No vendor'}`, value: i.id })))
+const jobOptions = computed(() => jobs.value.map(j => {
+  const idPart = j.job_id ? `${j.job_id}` : ''
+  const namePart = j.name ? `${j.name}` : ''
+  const label = [idPart, namePart].filter(Boolean).join(' ') || `Job ${j.id}`
+  return {
+    label: `${label}${j.vendor_name ? ` • ${j.vendor_name}` : ''}`,
+    value: j.id,
+  }
+}))
 
 function mapList (data) {
   if (Array.isArray(data)) return data
@@ -309,6 +353,7 @@ async function refreshAll () {
       vendorData,
       itemTypeData,
       contactData,
+      jobData,
       invoiceData,
       inventoryData,
       lineItemData,
@@ -317,6 +362,7 @@ async function refreshAll () {
       fetchAPI('/api/vendors/'),
       fetchAPI('/api/item-types/'),
       fetchAPI('/api/contacts/'),
+      fetchAPI('/api/jobs/'),
       fetchAPI('/api/invoices/'),
       fetchAPI('/api/inventory-items/'),
       fetchAPI('/api/line-items/'),
@@ -326,6 +372,7 @@ async function refreshAll () {
     vendors.value = mapList(vendorData)
     itemTypes.value = mapList(itemTypeData)
     contacts.value = mapList(contactData)
+    jobs.value = mapList(jobData)
     invoices.value = mapList(invoiceData)
     inventoryItems.value = mapList(inventoryData)
     lineItems.value = mapList(lineItemData)

@@ -1,21 +1,29 @@
 ---
-description: Frontend display of parsed invoice / test-parser results
+description: Inbox processing dialog, parsed invoice display, and persist API
 globs: invoice-frontend/src/components/InvoiceList.vue
 alwaysApply: false
 ---
 
-# Parser results UI
+# Inbox parser UI (`InvoiceList.vue`)
 
-## Data shape
+## Parsed data for the dialog
 
-Test Parser API `result` is always `{ vendor_name, invoices: [...] }` (one invoice for single-page PDFs). `parserResultInvoices(result)` returns `result.invoices`; `parsedInvoice` is the tab-selected entry. Multiple invoices show `q-tabs` keyed by `invoice_number`.
+- `parsedInvoices` ← `parserResultInvoices(data.parsed)` where `parsed` is `{ vendor_name, invoices: [...] }`
+- `parsedInvoice` — computed tab selection from `parsedInvoices`
+- **`POST /api/process-email/`** must populate `data.parsed` (backend: `parsed_envelope_for_process_result`)
+- **`POST /api/test-parser/`** returns `result` only; persist via **`POST /api/persist-parsed/`** when vendor is selected (auto after Test Parser, or **Save to database**)
 
-## Formatting numbers
+## Invoice / line item fields
 
-- Use `formatLineItemField(item, field)` for line item rows (supports `altKey`, e.g. length → height).
-- Dimensions: integers as-is; fractional values up to 4 decimals with trailing zeros removed (`parseFloat(value.toFixed(4))`).
-- Money fields: 2 decimal places.
+Header list uses parser keys: `date_ordered`, `invoice_due_date`, `cust_po`, etc.
 
-## API calls
+Line items: `id`, `job_id`, `job` (name), dimensions, qty, prices — use `formatLineItemField()`.
 
-Use `postAPI` / `putAPI` from `src/utils/api.js` — no hardcoded `localhost:8000` URLs (Vite proxies `/api` to Django in dev).
+## Processing dialog layout
+
+- Card class `processing-dialog`: fixed header + footer, scrollable `processing-dialog__body`
+- Do not nest competing `overflow` on PDF panel and parsed-results; body scrolls as one
+
+## API
+
+Use `postAPI` / `putAPI` from `src/utils/api.js` — no hardcoded backend URLs.

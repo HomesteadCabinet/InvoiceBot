@@ -22,7 +22,6 @@ PDF_PARSER_MAP = {
     "bitdefender.pdf": "parse_bitdefender_invoice",
     "crexendo.pdf": "parse_crexendo_invoice",
     "generic.pdf": "parse_american_saw_invoice",
-    "hafele_test1.pdf": "parse_hafele_invoice",
     "hm1.pdf": "parse_high_mountain_invoice",
     "hm2.pdf": "parse_high_mountain_invoice",
     "industrial_tool_supply.pdf": "parse_industrial_tool_supply_invoice",
@@ -111,6 +110,33 @@ WURTH_INVOICE_COUNTS = {
     "wurth6.pdf": 4,
 }
 
+HAFELE_EXPECTED = {
+    "hafele1.pdf": {
+        "invoice_number": "513005816",
+        "invoice_total": "671.44",
+        "cust_po": "23905",
+        "item_count": 14,
+    },
+    "hafele2.PDF": {
+        "invoice_number": "513395821",
+        "invoice_total": "515.25",
+        "cust_po": "25668",
+        "item_count": 1,
+        "part_ids": {"546.63.116"},
+    },
+    "hafele3.PDF": {
+        "invoice_number": "513400547",
+        "invoice_total": "1869.60",
+        "cust_po": "26663",
+        "item_count": 3,
+        "part_ids": {"502.57.950", "833.95.717", "833.75.261"},
+        "line_jobs": {
+            "833.95.717": {"job_id": "26663", "job": "FORDHAM HOT"},
+            "833.75.261": {"job_id": "26663", "job": "FORDHAM HOT"},
+        },
+    },
+}
+
 WURTH_EXPECTED = {
     "wurth.pdf": {
         "invoice_number": "9026368059",
@@ -151,6 +177,8 @@ for _pdf in sorted(os.listdir(_test_dir)):
         PDF_PARSER_MAP[_pdf] = "parse_wurth_invoice"
     if _pdf.startswith("eb") and _pdf.endswith(".pdf"):
         PDF_PARSER_MAP[_pdf] = "parse_edgebanding_services_invoice"
+    if _pdf.lower().startswith("hafele") and _pdf.lower().endswith(".pdf"):
+        PDF_PARSER_MAP[_pdf] = "parse_hafele_invoice"
 
 # Seller name between Invoice # and Bill To (when present in the PDF)
 ALLMOXY_EXPECTED_VENDOR = {
@@ -184,6 +212,8 @@ REQUIRED_LINE_ITEM_KEYS = {
     "id",
     "name",
     "description",
+    "job",
+    "job_id",
     "qty",
     "unit",
     "unit_price",
@@ -489,6 +519,57 @@ def validate_result(result, pdf_name=None, pdf_path=None):
                 raise AssertionError(
                     f"name {item.get('name')!r} missing {expected_eb['name_contains']!r}"
                 )
+
+    expected_hafele = HAFELE_EXPECTED.get(pdf_name)
+    if expected_hafele:
+        if invoice.get("invoice_number") != expected_hafele["invoice_number"]:
+            raise AssertionError(
+                f"invoice_number {invoice.get('invoice_number')!r} != "
+                f"{expected_hafele['invoice_number']!r}"
+            )
+        if invoice.get("cust_po") != expected_hafele["cust_po"]:
+            raise AssertionError(
+                f"cust_po {invoice.get('cust_po')!r} != {expected_hafele['cust_po']!r}"
+            )
+        exp_total = float(expected_hafele["invoice_total"])
+        got_total = float(invoice.get("invoice_total") or 0)
+        if abs(got_total - exp_total) > 0.02:
+            raise AssertionError(
+                f"invoice_total {got_total!r} != {exp_total!r}"
+            )
+        if len(invoice["line_items"]) != expected_hafele["item_count"]:
+            raise AssertionError(
+                f"expected {expected_hafele['item_count']} line items, "
+                f"got {len(invoice['line_items'])}"
+            )
+        part_ids = expected_hafele.get("part_ids")
+        if part_ids:
+            found_parts = {item["id"] for item in invoice["line_items"]}
+            if not part_ids <= found_parts:
+                raise AssertionError(
+                    f"missing part ids: {part_ids - found_parts}"
+                )
+        line_jobs = expected_hafele.get("line_jobs")
+        if line_jobs:
+            items_by_id = {item["id"]: item for item in invoice["line_items"]}
+            for item_id, expected_job in line_jobs.items():
+                item = items_by_id.get(item_id)
+                if not item:
+                    raise AssertionError(f"missing line item {item_id!r}")
+                if isinstance(expected_job, dict):
+                    if item.get("job_id") != expected_job.get("job_id"):
+                        raise AssertionError(
+                            f"{item_id} job_id {item.get('job_id')!r} != "
+                            f"{expected_job.get('job_id')!r}"
+                        )
+                    if item.get("job") != expected_job.get("job"):
+                        raise AssertionError(
+                            f"{item_id} job {item.get('job')!r} != {expected_job.get('job')!r}"
+                        )
+                elif item.get("job") != expected_job:
+                    raise AssertionError(
+                        f"{item_id} job {item.get('job')!r} != {expected_job!r}"
+                    )
 
     expected_wurth = WURTH_EXPECTED.get(pdf_name)
     if expected_wurth:

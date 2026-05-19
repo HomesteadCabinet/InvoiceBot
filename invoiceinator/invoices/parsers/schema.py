@@ -27,6 +27,8 @@ LINE_ITEM_ALIASES = {
     "width": ("width", "Width"),
     "length": ("length", "Length"),
     "height": ("height", "Height"),
+    "job": ("job", "Job", "job_name"),
+    "job_id": ("job_id", "Job ID", "Job Id"),
 }
 
 HEADER_ALIASES = {
@@ -159,6 +161,8 @@ def make_line_item(
     item_id="",
     name="",
     description="",
+    job="",
+    job_id="",
     qty="1",
     unit="",
     unit_price=0.0,
@@ -183,6 +187,8 @@ def make_line_item(
         "id": str(item_id or ""),
         "name": str(name or ""),
         "description": str(description or ""),
+        "job": str(job or ""),
+        "job_id": str(job_id or ""),
         "qty": str(qty or "1"),
         "unit": str(unit or ""),
         "unit_price": to_float(unit_price),
@@ -320,6 +326,8 @@ def normalize_line_item(raw):
         item_id=_pick_field(raw, LINE_ITEM_ALIASES["id"]),
         name=_pick_field(raw, LINE_ITEM_ALIASES["name"]),
         description=_pick_field(raw, LINE_ITEM_ALIASES["description"]),
+        job=_pick_field(raw, LINE_ITEM_ALIASES["job"]),
+        job_id=_pick_field(raw, LINE_ITEM_ALIASES["job_id"]),
         qty=_pick_field(raw, LINE_ITEM_ALIASES["qty"]) or "1",
         unit=_pick_field(raw, LINE_ITEM_ALIASES["unit"]),
         unit_price=_pick_field(raw, LINE_ITEM_ALIASES["unit_price"]),

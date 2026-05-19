@@ -102,13 +102,19 @@ async function connectGoogle () {
       credentials: 'include'
     })
     const data = await response.json()
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to start Google authorization')
+    }
+    if (!data.authorization_url) {
+      throw new Error('No authorization URL returned from server')
+    }
     window.location.href = data.authorization_url
-  } catch {
+  } catch (err) {
+    loading.value = false
     Notify.create({
       type: 'negative',
-      message: 'Failed to start Google authorization'
+      message: err?.message || 'Failed to start Google authorization'
     })
-    loading.value = false
   }
 }
 

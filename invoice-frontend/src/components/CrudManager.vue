@@ -59,7 +59,7 @@
       <q-separator />
 
       <q-card-section>
-        <q-form class="q-gutter-md" @submit.prevent="saveRecord">
+        <q-form @submit.prevent="saveRecord">
           <div class="row q-col-gutter-md">
             <div
               v-for="field in fields"

@@ -36,6 +36,38 @@ class ItemType(models.Model):
         return self.name
 
 
+class Job(models.Model):
+    vendor = models.ForeignKey(
+        Vendor,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='jobs',
+    )
+    job_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text='Business job identifier (e.g. numeric PO from Hafele line items).',
+    )
+    name = models.CharField(max_length=255, blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['vendor', 'job_id', 'name']
+        ordering = ['job_id', 'name']
+
+    def __str__(self):
+        label = self.job_id or self.name or 'Job'
+        if self.name and self.job_id and self.name != self.job_id:
+            label = f"{self.job_id} {self.name}"
+        if self.vendor:
+            return f"{label} ({self.vendor.name})"
+        return label
+
+
 class Contact(models.Model):
     vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name='contacts', null=True, blank=True)
     name = models.CharField(max_length=255)
@@ -140,6 +172,13 @@ class LineItem(models.Model):
         related_name='line_items',
     )
     item_type = models.ForeignKey(ItemType, on_delete=models.SET_NULL, null=True, blank=True)
+    job = models.ForeignKey(
+        Job,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='line_items',
+    )
     item_id = models.CharField(max_length=255, blank=True, default='')
     name = models.CharField(max_length=255, blank=True, default='')
     description = models.TextField(blank=True, default='')

@@ -16,7 +16,7 @@ alwaysApply: false
 
 Each invoice in `invoices`: `invoice_number`, `ship_date`, `date_ordered`, `vendor_name`, `invoice_total`, `invoice_due_date`, `cust_po`, `line_items`
 
-Each line item must include: `id`, `name`, `description`, `qty`, `unit`, `unit_price`, `total_price`, `width`, `length`, `height`.
+Each line item must include: `id`, `name`, `description`, `job_id`, `job` (name), `qty`, `unit`, `unit_price`, `total_price`, `width`, `length`, `height`. Use empty `job_id`/`job` when the PDF has no per-line job. Hafele: `PO Number: 26294 FMD 31801` → `job_id="26294"`, `job="FMD 31801"`.
 
 Build items with `make_line_item(...)` — do not hand-roll dicts. Set display name on the function: `parse_foo_invoice.name = "Vendor Name"`.
 
@@ -64,6 +64,17 @@ Register new parsers in `parsers/__init__.py` (`_PARSER_FUNCTIONS`).
 2. Map test PDF in `invoiceinator/test/test_parsers.py` → `PDF_PARSER_MAP`.
 3. Run `python test/test_parsers.py` from `invoiceinator/`.
 4. Prefer shared helpers (`_parse_allmoxy_style_line_items`, `_parse_sierra_stacked_line_items`, `stacked.py`, etc.) over duplicating logic.
+
+## Hafele line items
+
+Anchor each row on: POS, qty, unit, article (`###.##.###`), `Pack Qty =`, prices, then description.
+
+Per-line **`PO Number:`** above the row (not only the header):
+
+- `PO Number: 26294 FMD 31801` → `job_id="26294"`, `job="FMD 31801"`
+- Numeric only → `job_id` set, `job=""`
+
+Use `_job_above_line_item()` scanning backward; dedupe by POS.
 
 ## Allmoxy / stacked PDF text
 

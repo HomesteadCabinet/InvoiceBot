@@ -4,6 +4,7 @@ from .models import (
     Invoice,
     InvoiceAutomationSettings,
     InventoryItem,
+    Job,
     LineItem,
     ItemType,
     Vendor,
@@ -39,6 +40,14 @@ class InvoiceAutomationSettingsSerializer(serializers.ModelSerializer):
         read_only_fields = ('last_processed_at', 'updated_at')
 
 
+class JobSerializer(serializers.ModelSerializer):
+    vendor_name = serializers.CharField(source='vendor.name', read_only=True)
+
+    class Meta:
+        model = Job
+        fields = '__all__'
+
+
 class InventoryItemSerializer(serializers.ModelSerializer):
     vendor_name = serializers.CharField(source='vendor.name', read_only=True)
     item_type_name = serializers.CharField(source='item_type.name', read_only=True)
@@ -50,7 +59,11 @@ class InventoryItemSerializer(serializers.ModelSerializer):
 
 class LineItemSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    vendor_name = serializers.CharField(source='invoice.vendor.name', read_only=True)
+    invoice_date = serializers.DateField(source='invoice.invoice_date', read_only=True)
     item_type_name = serializers.CharField(source='item_type.name', read_only=True)
+    job_number = serializers.CharField(source='job.job_id', read_only=True)
+    job_name = serializers.CharField(source='job.name', read_only=True)
     inventory_item_name = serializers.CharField(source='inventory_item.name', read_only=True)
 
     class Meta:

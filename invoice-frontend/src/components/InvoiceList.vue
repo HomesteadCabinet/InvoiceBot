@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { Notify } from 'quasar'
+import { Dialog, Notify } from 'quasar'
 import VuePdfEmbed from 'vue-pdf-embed'
 import { fetchAPI, postAPI, putAPI } from '../utils/api'
 
@@ -93,6 +93,9 @@ const rememberPageSize = ref(storedConfig.rememberPageSize)
 const savedFilters = ref({ ...storedConfig.filters })
 const savedPageSize = ref(storedConfig.pageSize)
 const googleConnected = ref(false)
+const googleConfigured = ref(true)
+const googleConfigError = ref('')
+const googleRedirectUri = ref('')
 const googleScopes = ref([])
 const googleLoading = ref(false)
 const automationSettings = ref({
@@ -177,6 +180,8 @@ const INVOICE_HEADER_FIELDS = [
 
 const LINE_ITEM_FIELDS = [
   { key: 'id', label: 'ID' },
+  { key: 'job_id', label: 'Job ID' },
+  { key: 'job', label: 'Job Name' },
   { key: 'name', label: 'Name' },
   { key: 'description', label: 'Description' },
   { key: 'width', label: 'Width' },
@@ -307,6 +312,9 @@ async function loadGoogleStatus () {
   try {
     const data = await fetchAPI('/api/google/status/')
     googleConnected.value = Boolean(data.connected)
+    googleConfigured.value = data.configured !== false
+    googleConfigError.value = data.error || ''
+    googleRedirectUri.value = data.redirect_uri || ''
     googleScopes.value = data.scopes || []
   } catch {
     Notify.create({
@@ -407,20 +415,58 @@ async function exportXlsx () {
   }
 }
 
+function showGoogleSetupDialog () {
+  const redirectUri = googleRedirectUri.value || 'http://localhost:9000/api/google/callback/'
+  Dialog.create({
+    title: 'Set up Google sign-in',
+    message: [
+      'To open the Google login screen, add OAuth credentials on the server:',
+      '',
+      '1. In Google Cloud Console → APIs & Services → Credentials, create an OAuth 2.0 Web client.',
+      '2. Enable the Gmail API for your project.',
+      `3. Add authorized redirect URI: ${redirectUri}`,
+      '4. On the server, either:',
+      '   • Copy invoiceinator/client.json.example to invoiceinator/client.json and paste your client ID/secret, or',
+      '   • Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (see invoiceinator/.env.example).',
+      '5. Restart Django (./run.sh django), then click Connect Google again.',
+    ].join('\n'),
+    ok: { label: 'Got it', color: 'primary' },
+    style: 'white-space: pre-line',
+  })
+}
+
 async function connectGoogle () {
+  if (!googleConfigured.value) {
+    showGoogleSetupDialog()
+    return
+  }
+
   googleLoading.value = true
   try {
     const response = await fetch('/api/google/auth-url/', {
       credentials: 'include',
     })
     const data = await response.json()
+    if (!response.ok) {
+      if (response.status === 503) {
+        googleConfigured.value = false
+        googleConfigError.value = data.error || ''
+        showGoogleSetupDialog()
+        return
+      }
+      throw new Error(data.error || 'Failed to start Google authorization')
+    }
+    if (!data.authorization_url) {
+      throw new Error('No authorization URL returned from server')
+    }
     window.location.href = data.authorization_url
-  } catch {
-    googleLoading.value = false
+  } catch (err) {
     Notify.create({
       type: 'negative',
-      message: 'Failed to start Google authorization',
+      message: err?.message || 'Failed to start Google authorization',
     })
+  } finally {
+    googleLoading.value = false
   }
 }
 
@@ -671,25 +717,30 @@ async function processEmail(email_id) {
     currentInvoice.value.email_id = email_id
     currentInvoice.value.email = email.from
 
-    // Find the vendor in the vendors list and use its value property
-    let vendor = vendors.value.find(v => v.id === data.vendor.id)
-    if (!vendor) {
-      // Create new vendor object
-      vendor = {
-        ...data.vendor,
+    if (data.vendor?.id) {
+      let vendor = vendors.value.find(v => v.id === data.vendor.id)
+      if (!vendor) {
+        vendor = { ...data.vendor }
+        vendors.value.push(vendor)
       }
-      // Add to vendors list
-      vendors.value.push(vendor)
+      selectedVendor.value = vendor
     }
-    selectedVendor.value = vendor
+
     status.value = data.status
     resetPdfPreview()
     showProcessingModal.value = true
-    tableData.value = data.invoice.tables
-    textData.value = data.invoice.text
-    parsedInvoices.value = []
+    tableData.value = data.invoice?.tables
+    textData.value = data.invoice?.text
+    parsedInvoices.value = parserResultInvoices(data.parsed || {})
     selectedInvoiceIndex.value = 0
     tab.value = 'pdf'
+
+    if (!parsedInvoices.value.length && data.status === 'processed') {
+      Notify.create({
+        type: 'warning',
+        message: 'Email processed but no invoice line items were found to display',
+      })
+    }
   } catch (error) {
     email.status = 'error'
     email.busy = false
@@ -762,6 +813,57 @@ async function getParsers() {
   }
 }
 
+async function persistParsedToDatabase(parsedEnvelope) {
+  if (!selectedVendor.value?.id) {
+    Notify.create({
+      type: 'warning',
+      message: 'Select a vendor before saving parsed data to the database',
+    })
+    return null
+  }
+
+  const envelope = parsedEnvelope || {
+    vendor_name: parsedInvoices.value[0]?.vendor_name || selectedVendor.value?.name,
+    invoices: parsedInvoices.value,
+  }
+  if (!envelope.invoices?.length) {
+    Notify.create({ type: 'warning', message: 'No parsed invoices to save' })
+    return null
+  }
+
+  try {
+    const data = await postAPI('/api/persist-parsed/', {
+      vendor_id: selectedVendor.value.id,
+      parsed: envelope,
+      email_id: currentInvoice.value?.email_id,
+      pdf_filename: currentInvoice.value?.attachments?.[0]?.filename,
+      email_payload: {
+        from: currentInvoice.value?.email || currentInvoice.value?.from || '',
+        subject: currentInvoice.value?.subject || currentInvoice.value?.snippet || '',
+        date: currentInvoice.value?.date || '',
+      },
+    })
+    if (data.error) {
+      Notify.create({ type: 'negative', message: data.error })
+      return null
+    }
+    const count = data.invoice_ids?.length || 0
+    const lineCount = (data.invoices || []).reduce(
+      (sum, inv) => sum + (inv.line_items?.length || 0),
+      0
+    )
+    Notify.create({
+      type: 'positive',
+      message: `Saved ${count} invoice(s) and ${lineCount} line item(s) to the database`,
+    })
+    return data
+  } catch (error) {
+    console.error('Error persisting parsed invoice:', error)
+    Notify.create({ type: 'negative', message: 'Failed to save parsed data to the database' })
+    return null
+  }
+}
+
 async function testParser() {
   if (!selectedParser.value) {
     alert('Please select a parser first')
@@ -786,13 +888,17 @@ async function testParser() {
       const invoices = parserResultInvoices(data.result)
       parsedInvoices.value = invoices
       selectedInvoiceIndex.value = 0
-      console.log('data.result', data.result)
       if (!invoices.length) {
         alert('No invoices found in the PDF, please check the parser')
       } else if (invoices.every(inv => !inv.line_items?.length)) {
         alert('No line items found in the invoice(s), please check the parser')
-      } else if (invoices.length > 1) {
-        console.log(`Parsed ${invoices.length} invoices from PDF`)
+      } else if (selectedVendor.value) {
+        await persistParsedToDatabase(data.result)
+      } else {
+        Notify.create({
+          type: 'info',
+          message: 'Select a vendor to save parsed invoices to the database',
+        })
       }
     }
   } catch (error) {
@@ -1080,6 +1186,25 @@ onMounted(() => {
               </q-badge>
             </div>
 
+            <q-banner
+              v-if="!googleConfigured"
+              class="bg-warning text-dark q-mb-sm"
+              rounded
+            >
+              <div>
+                {{ googleConfigError || 'Server OAuth credentials are not set up yet.' }}
+              </div>
+              <template #action>
+                <q-btn
+                  flat
+                  dense
+                  color="dark"
+                  label="Setup steps"
+                  @click="showGoogleSetupDialog"
+                />
+              </template>
+            </q-banner>
+
             <div class="text-caption text-grey-7 q-mb-sm">
               Connected scopes:
               <span v-if="googleScopes.length">{{ googleScopes.join(', ') }}</span>
@@ -1239,18 +1364,18 @@ onMounted(() => {
 
   <!-- Processing Dialog -->
   <q-dialog v-model="showProcessingModal" full-width>
-    <q-card>
-      <q-card-section class="row items-center q-pb-none">
+    <q-card class="processing-dialog">
+      <q-card-section class="processing-dialog__header row items-center q-pb-none">
         <div class="text-h6">Processing Invoice</div>
         <q-space />
         <q-btn icon="close" flat round dense v-close-popup />
       </q-card-section>
 
-      <q-card-section>
-        <div class="row">
+      <q-card-section class="processing-dialog__body q-pt-sm">
+        <div class="row processing-dialog__content">
           <!-- Left side: PDF iframe -->
-          <div class="col-12 col-md-8">
-            <q-card>
+          <div class="col-12 col-md-8 processing-dialog__pdf-col">
+            <q-card class="processing-dialog__panel">
               <q-card-section class="q-py-sm">
                 <div class="row">
                   <div class="col">
@@ -1274,8 +1399,8 @@ onMounted(() => {
 
               <q-separator />
 
-              <q-tab-panels v-model="tab" animated keep-alive>
-                <q-tab-panel name="pdf">
+              <q-tab-panels v-model="tab" animated keep-alive class="processing-dialog__tab-panels">
+                <q-tab-panel name="pdf" class="processing-dialog__tab-panel">
                   <div v-if="currentInvoice?.attachments?.length" class="attachments-container">
                     <div
                       v-for="(attachment, index) in currentInvoice.attachments"
@@ -1308,6 +1433,7 @@ onMounted(() => {
                           {{ pdfPageCount }} pages
                         </div>
                         <VuePdfEmbed
+                          :key="attachment.url"
                           :source="attachment.url"
                           class="pdf-embed"
                           @loaded="onPdfLoaded"
@@ -1333,12 +1459,12 @@ onMounted(() => {
           </div>
 
           <!-- Right side: Form controls -->
-          <div class="col-12 col-md-4">
-            <q-card style="height: 100% ;">
-              <q-card-section class="q-py-sm">
+          <div class="col-12 col-md-4 processing-dialog__form-col">
+            <q-card class="processing-dialog__panel processing-dialog__form-panel">
+              <q-card-section class="q-py-sm processing-dialog__form-header">
                 <div class="text-h6">Invoice Parser</div>
               </q-card-section>
-              <q-card-section class="column data-rules-card full-height">
+              <q-card-section class="column data-rules-card processing-dialog__form-body">
                 <div class="col-auto">
                   <div class="col-12 q-mb-sm">
                     <q-input
@@ -1392,8 +1518,7 @@ onMounted(() => {
                   </div>
                 </div>
 
-                <q-space class="col" />
-                <div class="col-auto q-pb-xl parsed-results">
+                <div class="parsed-results processing-dialog__parsed-results">
                   <template v-if="parsedInvoice">
                     <q-tabs
                       v-if="parsedInvoices.length > 1"
@@ -1484,7 +1609,7 @@ onMounted(() => {
         </div>
       </q-card-section>
 
-      <q-card-actions>
+      <q-card-actions class="processing-dialog__footer">
         <div class="row full-width justify-between">
           <div class="col-auto">
             <q-btn
@@ -1523,9 +1648,18 @@ onMounted(() => {
             </q-btn>
             <q-btn
               color="primary"
+              class="q-mr-sm"
+              :disable="!parsedInvoices.length || !selectedVendor"
+              @click="persistParsedToDatabase()"
+            >
+              Save to database
+            </q-btn>
+            <q-btn
+              color="primary"
+              outline
               @click="saveInvoiceConfig"
             >
-              Save Invoice Configuration
+              Save vendor parser
             </q-btn>
           </div>
         </div>
@@ -1603,12 +1737,11 @@ onMounted(() => {
 }
 
 .invoice-row--pending {
-  background-color: rgba($warning, 0.12);
+  //ckground-color: rgba($warning, 0.12);
 }
 
 .attachments-container {
-  height: 100%;
-  overflow-y: auto;
+  width: 100%;
 }
 
 .attachment-frame {
@@ -1643,10 +1776,37 @@ onMounted(() => {
 
 .pdf-container {
   position: relative;
-  max-height: 90vh;
-  min-height: 500px;
-  overflow: auto;
+  min-height: 12rem;
   background-color: $grey-2;
+}
+
+.processing-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(1400px, 100%);
+  max-height: 92vh;
+  overflow: hidden;
+}
+
+.processing-dialog__header,
+.processing-dialog__footer {
+  flex: 0 0 auto;
+}
+
+.processing-dialog__footer {
+  border-top: 1px solid $grey-4;
+}
+
+.processing-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.processing-dialog__parsed-results {
+  max-width: none;
 }
 
 .pdf-embed {
@@ -1709,8 +1869,6 @@ onMounted(() => {
 .parsed-results {
   max-width: 22rem;
   overflow-y: auto;
-
-
 }
 
 .config-dialog {

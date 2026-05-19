@@ -7,9 +7,10 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/Dev/Invoiceinator/invoiceinator
 Environment=PYENV_ROOT=%h/.pyenv
+Environment=PYENV_VERSION=invoiceinator
 Environment=PATH=%h/.pyenv/bin:%h/.pyenv/shims:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
-ExecStart=pyenv exec python manage.py runserver 0.0.0.0:9999
+ExecStart=%h/.pyenv/bin/pyenv exec python manage.py runserver 0.0.0.0:9999
 Restart=on-failure
 RestartSec=3
 

@@ -12,8 +12,10 @@ from .views import (
     export_invoices_xlsx,
     list_invoice_emails,
     process_invoice_email,
+    persist_parsed_invoice_view,
     process_invoices_now,
     ItemTypeViewSet,
+    JobViewSet,
     LineItemViewSet,
     VendorViewSet,
     test_parser
@@ -22,6 +24,7 @@ from .views import (
 router = DefaultRouter()
 router.register(r'vendors', VendorViewSet)
 router.register(r'item-types', ItemTypeViewSet, basename='item-type')
+router.register(r'jobs', JobViewSet, basename='job')
 router.register(r'contacts', ContactViewSet, basename='contact')
 router.register(r'invoices', InvoiceViewSet, basename='invoice')
 router.register(r'inventory-items', InventoryItemViewSet, basename='inventory-item')
@@ -37,6 +40,7 @@ urlpatterns = [
     path('google/disconnect/', google_disconnect),
     path('emails/', list_invoice_emails),
     path('process-email/', process_invoice_email),
+    path('persist-parsed/', persist_parsed_invoice_view),
     path('', include(router.urls)),
     path('test-parser/', test_parser),
 ]

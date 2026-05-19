@@ -4,6 +4,7 @@ from .models import (
     Invoice,
     InvoiceAutomationSettings,
     InventoryItem,
+    Job,
     LineItem,
     ItemType,
     ProcessedEmail,
@@ -32,6 +33,13 @@ class ItemTypeAdmin(admin.ModelAdmin):
     search_fields = ('name',)
 
 
+@admin.register(Job)
+class JobAdmin(admin.ModelAdmin):
+    list_display = ('job_id', 'name', 'vendor', 'updated_at')
+    list_filter = ('vendor',)
+    search_fields = ('job_id', 'name', 'notes')
+
+
 @admin.register(Contact)
 class ContactAdmin(admin.ModelAdmin):
     list_display = ('name', 'vendor', 'email', 'is_primary')
@@ -53,7 +61,7 @@ class InvoiceAdmin(admin.ModelAdmin):
 
 @admin.register(LineItem)
 class LineItemAdmin(admin.ModelAdmin):
-    list_display = ('invoice', 'item_id', 'name', 'item_type', 'qty', 'total_price')
+    list_display = ('invoice', 'item_id', 'name', 'job', 'item_type', 'qty', 'total_price')
     search_fields = ('item_id', 'name', 'description')
 
 

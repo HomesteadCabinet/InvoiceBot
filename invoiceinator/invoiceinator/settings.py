@@ -10,14 +10,41 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # TODO: Make this an environment variable or something
 SHEET_ID = '13_nri-gfP9A8w69TXKujR0z_ma4Oqy4zywOJXeJZOUY'
-VITE_SERVER_URL = 'http://localhost:9000'
+VITE_SERVER_URL = os.environ.get('VITE_SERVER_URL', 'http://localhost:9000')
+# OAuth callback must use the frontend origin so session cookies match (Vite proxies /api to Django).
+GOOGLE_OAUTH_REDIRECT_URI = os.environ.get(
+    'GOOGLE_OAUTH_REDIRECT_URI',
+    f'{VITE_SERVER_URL}/api/google/callback/',
+)
+GOOGLE_CLIENT_SECRETS_FILE = os.environ.get(
+    'GOOGLE_CLIENT_SECRETS_FILE',
+    '',
+)
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '')
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_env_file():
+    env_path = BASE_DIR / '.env'
+    if not env_path.is_file():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"\''))
+
+
+_load_env_file()
 
 
 # Quick-start development settings - unsuitable for production
@@ -29,7 +56,7 @@ SECRET_KEY = 'django-insecure-+cxud0t)q-pzzpoa=w3dkl))4i+w2om3*uyvc*n)+d44)eql&w
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
 
 
 # Application definition

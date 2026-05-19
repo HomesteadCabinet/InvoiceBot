@@ -5,6 +5,96 @@ import re
 from .pdf import pdf_lines, pdf_text
 from .schema import empty_invoice, make_line_item, normalize_invoice, to_float
 
+_ARTICLE_RE = re.compile(r"^\d{3}\.\d{2}\.\d{3}$")
+_POS_RE = re.compile(r"^\d{1,2}$")
+_QTY_RE = re.compile(r"^\d+$")
+_AMOUNT_RE = re.compile(r"^[\d,]+\.\d{2}$")
+_PO_NUMBER_RE = re.compile(r"PO Number:\s*(.+)", re.IGNORECASE)
+_DESC_STOP_PREFIXES = (
+    "HTS:",
+    "PO Number:",
+    "MERCHANDISE TOTAL",
+    "Carry forward",
+    "For inquiries",
+    "Customer-No",
+    "SAP PAGE",
+    "Hafele America Co.",
+    "Sold to:",
+    "Page:",
+    "STANDARD TERMS",
+    "All Purchase Orders",
+)
+
+
+def _parse_unit_price(raw):
+    if not raw:
+        return 0.0
+    if "free" in raw.lower():
+        return 0.0
+    return to_float(raw)
+
+
+def _job_from_po_value(po_value):
+    """Parse per-line ``PO Number:`` into job id and name (e.g. ``26294 FMD 31801``)."""
+    po_value = (po_value or "").strip()
+    if not po_value or po_value.upper() == "SHOP":
+        return "", ""
+    match = re.match(r"^(\d+)\s*(.*)$", po_value)
+    if match:
+        return match.group(1), match.group(2).strip()
+    return "", ""
+
+
+def _job_above_line_item(lines, item_index):
+    for j in range(item_index - 1, max(-1, item_index - 15), -1):
+        match = _PO_NUMBER_RE.search(lines[j])
+        if match:
+            return _job_from_po_value(match.group(1))
+        if _is_line_item_start(lines, j):
+            break
+    return "", ""
+
+
+def _cust_po_from_lines(lines):
+    """Prefer numeric PO; item blocks often repeat a more specific PO than the header."""
+    candidates = []
+    for line in lines:
+        m = re.search(r"PO Number:\s*(.+)", line, re.IGNORECASE)
+        if m:
+            candidates.append(m.group(1).strip())
+    for po in reversed(candidates):
+        m = re.match(r"^(\d+)", po)
+        if m:
+            return m.group(1)
+    for po in reversed(candidates):
+        if po.upper() != "SHOP":
+            return po.split()[0] if po.split() else po
+    return candidates[0] if candidates else None
+
+
+def _is_line_item_start(lines, i):
+    return (
+        i + 8 < len(lines)
+        and _POS_RE.match(lines[i])
+        and _QTY_RE.match(lines[i + 1])
+        and _ARTICLE_RE.match(lines[i + 3])
+        and lines[i + 4] == "Pack Qty ="
+    )
+
+
+def _collect_description(lines, start):
+    parts = []
+    j = start
+    while j < len(lines):
+        line = lines[j]
+        if any(line.startswith(prefix) for prefix in _DESC_STOP_PREFIXES):
+            break
+        if _is_line_item_start(lines, j):
+            break
+        parts.append(line)
+        j += 1
+    return " ".join(parts)
+
 
 def parse_hafele_invoice(pdf_path):
     """Hafele America Co. — multi-page POS/quantity/article invoices."""
@@ -22,71 +112,47 @@ def parse_hafele_invoice(pdf_path):
                 if re.search(r"[A-Za-z]{3,}.*\d{4}", lines[j]):
                     result["date_ordered"] = lines[j]
                     break
-        if not result["cust_po"] and "PO Number:" in line:
-            m = re.search(r"PO Number:\s*(\d+)", line)
-            if m:
-                result["cust_po"] = m.group(1)
-        if not result["invoice_total"] and re.match(r"^[\d,]+\.\d{2}$", line):
-            # Last page total often appears near USD lines; prefer larger totals
-            val = to_float(line)
-            if val > to_float(result["invoice_total"] or 0):
-                result["invoice_total"] = f"{val:.2f}"
+
+    result["cust_po"] = _cust_po_from_lines(lines)
 
     m = re.search(r"USD\s*\n\s*([\d,]+\.\d{2})", pdf_text(pdf_path))
     if m:
         result["invoice_total"] = m.group(1).replace(",", "")
 
-    current_po = result["cust_po"]
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if "PO Number:" in line:
-            m = re.search(r"PO Number:\s*(\d+)", line)
-            if m:
-                current_po = m.group(1)
-            i += 1
+    seen_pos = set()
+    for i in range(len(lines)):
+        if not _is_line_item_start(lines, i):
             continue
 
-        if re.match(r"^\d{1,2}$", line):
-            try:
-                pos = line
-                qty = lines[i + 1]
-                unit = lines[i + 2]
-                article_no = lines[i + 3]
-                unit_price = lines[i + 6]
-                amount = lines[i + 7]
-                if not re.match(r"^\d+(\.\d+)?$", unit_price) or not re.match(r"^\d+(\.\d+)?$", amount):
-                    i += 1
-                    continue
+        pos = lines[i]
+        if pos in seen_pos:
+            continue
+        seen_pos.add(pos)
 
-                description_lines = []
-                j = i + 8
-                while j < len(lines):
-                    desc_line = lines[j]
-                    if not desc_line or desc_line.startswith("HTS:") or re.match(r"^\d{1,2}$", desc_line):
-                        break
-                    if desc_line.startswith("PO Number:"):
-                        break
-                    description_lines.append(desc_line)
-                    j += 1
+        article_no = lines[i + 3]
 
-                desc = " ".join(description_lines)
-                result["line_items"].append(
-                    make_line_item(
-                        item_id=article_no,
-                        name=desc.split(",")[0] if desc else article_no,
-                        description=desc,
-                        qty=qty,
-                        unit=unit,
-                        unit_price=unit_price,
-                        total_price=amount,
-                    )
-                )
-                i = j
-                continue
-            except (IndexError, ValueError):
-                pass
-        i += 1
+        qty = lines[i + 1]
+        unit = lines[i + 2]
+        unit_price = _parse_unit_price(lines[i + 7])
+        amount = lines[i + 8]
+        if not _AMOUNT_RE.match(amount) and not (amount.replace(",", "").replace(".", "").isdigit()):
+            continue
+
+        desc = _collect_description(lines, i + 9)
+        job_id, job_name = _job_above_line_item(lines, i)
+        result["line_items"].append(
+            make_line_item(
+                item_id=article_no,
+                name=desc.split(",")[0] if desc else article_no,
+                description=desc,
+                job_id=job_id,
+                job=job_name,
+                qty=qty,
+                unit=unit,
+                unit_price=unit_price,
+                total_price=amount,
+            )
+        )
 
     return normalize_invoice(result)
 

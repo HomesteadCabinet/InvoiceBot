@@ -1,0 +1,42 @@
+---
+description: Persist parsed PDFs to Django models and process-email API shape
+globs: invoiceinator/invoices/services.py,invoiceinator/invoices/views.py,invoiceinator/invoices/models.py
+alwaysApply: false
+---
+
+# Parse → persist → API
+
+## Persistence entrypoint
+
+After `normalize_parser_output()`, persist with `persist_parsed_invoices(vendor, email_payload, parsed_output, message_id_base)` in `services.py`. It creates/updates:
+
+- **Vendor** — explicit vendor or `vendor_name` / sender email
+- **Contact** — `resolve_contact()` from `From` header
+- **Invoice** — `upsert_invoice_from_payload()` on `source_email_id` (`{gmail_id}:1`, `:2`, …)
+- **LineItem**, **Job** (`resolve_job(job_id, job_name)`), **ItemType**, **InventoryItem**
+
+Re-import replaces line items on the same `source_email_id`.
+
+## Job model
+
+- `Job.job_id` — business id (e.g. Hafele numeric PO `26294`), **not** Django PK
+- `Job.name` — remainder (e.g. `FMD 31801`)
+- Parser line items use `job_id` + `job` (name); DB links via `LineItem.job` FK
+
+## Process-email response
+
+`POST /api/process-email/` must return **`parsed`** for the inbox dialog:
+
+```python
+{"vendor_name": "...", "invoices": [<parser-shaped invoice dicts>]}
+```
+
+Build with `parsed_envelope_for_process_result(result, email_id, vendor)` — from fresh parse, `ProcessedEmail.data`, saved invoices, or DB by `email_id` when skipped.
+
+Map saved rows with `invoice_to_parser_dict()` (`invoice_date` → `date_ordered`, `item_id` → `id`, `job_number` → `job_id`).
+
+## Other endpoints
+
+- `POST /api/persist-parsed/` — manual save from Test Parser / Save to database
+- `POST /api/test-parser/` — parse only; returns `result` envelope, no DB write
+- Deleting last invoice for a Gmail message resets `ProcessedEmail` to `pending` (signal in `signals.py`)

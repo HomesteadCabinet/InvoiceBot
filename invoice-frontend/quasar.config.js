@@ -83,7 +83,31 @@ export default defineConfig((/* ctx */) => {
 
     // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#framework
     framework: {
-      config: {},
+      config: {
+        brand: {
+          primary: '#1976D2',
+          secondary: '#26A69A',
+          accent: '#9C27B0',
+          dark: '#1D1D1D',
+          positive: '#21BA45',
+          negative: '#C10015',
+          info: '#31CCEC',
+          warning: '#F2C037',
+        },
+        notify: {
+          position: 'top-right',
+          timeout: 3000,
+          textColor: 'white',
+          actions: [{ icon: 'close', color: 'white' }],
+        },
+        loading: {
+          spinner: 'QSpinnerGears',
+          spinnerColor: 'primary',
+          spinnerSize: 140,
+          backgroundColor: 'white',
+          message: 'Loading...',
+        },
+      },
 
       // iconSet: 'material-icons', // Quasar icon set
       // lang: 'en-US', // Quasar language pack
@@ -95,8 +119,8 @@ export default defineConfig((/* ctx */) => {
       // components: [],
       // directives: [],
 
-      // Quasar plugins
-      plugins: []
+      // Quasar plugins (required for Notify.create / $q.notify in components)
+      plugins: ['Notify', 'Dialog', 'Loading'],
     },
 
     // animations: 'all', // --- includes all animations

@@ -4,23 +4,28 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from .utils import get_gmail_service
 from .google_oauth import (
+    GoogleOAuthNotConfiguredError,
     build_frontend_redirect,
     disconnect_credentials,
     exchange_authorization_code,
     get_authorization_url,
     get_connection_status,
 )
-from .models import Contact, Invoice, InventoryItem, ItemType, LineItem, ProcessedEmail, Vendor, VendorEmail
+from .models import Contact, Invoice, InventoryItem, ItemType, Job, LineItem, ProcessedEmail, Vendor, VendorEmail
 from .serializers import (
     ContactSerializer,
     InvoiceAutomationSettingsSerializer,
     InvoiceSerializer,
     InventoryItemSerializer,
     ItemTypeSerializer,
+    JobSerializer,
     LineItemSerializer,
     VendorSerializer,
 )
 from .services import (
+    attachment_info_for_message,
+    parsed_envelope_for_process_result,
+    persist_parsed_invoices,
     export_invoices_workbook,
     get_automation_settings,
     process_gmail_message,
@@ -216,6 +221,18 @@ def _google_connection_error_response(exc):
     )
 
 
+def _invoice_payload_from_result(result, email_id=None):
+    parsed = result.get('parsed') or {}
+    invoices = parsed.get('invoices') or []
+    invoice = dict(invoices[0]) if invoices else {}
+    attachment = result.get('attachment')
+    if not attachment and email_id:
+        attachment = attachment_info_for_message(email_id)
+    if attachment:
+        invoice['attachments'] = [attachment]
+    return invoice
+
+
 def _serialize_list_email(service, message_id, processed=None):
     email = service.users().messages().get(userId='me', id=message_id).execute()
     attachment_count = 0
@@ -343,14 +360,36 @@ def process_invoice_email(request):
         return _google_connection_error_response(exc)
     try:
         result = process_gmail_message(service, email_id)
+        if result.get('status') == 'skipped':
+            processed = ProcessedEmail.objects.filter(email_id=email_id).first()
+            if processed:
+                result = {
+                    'status': 'processed',
+                    'parsed': processed.data or {},
+                    'processed_email': processed,
+                    'attachment': attachment_info_for_message(email_id),
+                }
+
         vendor = None
         if result.get('processed_email') and result['processed_email'].vendor_id:
             vendor = result['processed_email'].vendor
 
+        saved_invoices = result.get('invoices') or []
+        parsed = parsed_envelope_for_process_result(result, email_id=email_id, vendor=vendor)
+        if vendor is None and saved_invoices and hasattr(saved_invoices[0], 'vendor_id'):
+            vendor = saved_invoices[0].vendor
+
         return Response({
             'status': result.get('status', 'error'),
-            'invoice': result.get('parsed', {}).get('invoices', [{}])[0] if result.get('parsed') else {},
+            'invoice': _invoice_payload_from_result(
+                {**result, 'parsed': parsed},
+                email_id=email_id,
+            ),
+            'parsed': parsed,
+            'saved_invoices': InvoiceSerializer(saved_invoices, many=True).data if saved_invoices else [],
             'vendor': VendorSerializer(vendor).data if vendor else None,
+            'vendor_name': vendor.name if vendor else parsed.get('vendor_name'),
+            'vendor_id': vendor.id if vendor else None,
             'errors': [] if result.get('status') == 'processed' else [result.get('reason', 'Processing failed')],
         })
     except Exception as exc:
@@ -417,7 +456,6 @@ def test_parser(request):
         })
 
     except Exception as e:
-        # Get the traceback information
         tb = traceback.extract_tb(e.__traceback__)
         if tb:
             # Get the last frame where the error occurred
@@ -442,9 +480,70 @@ def test_parser(request):
         )
 
 
+@api_view(['POST'])
+def persist_parsed_invoice_view(request):
+    """Create or update DB records from normalized parser output."""
+    from .parsers import normalize_parser_output
+
+    raw_parsed = request.data.get('parsed') or request.data.get('result')
+    if not raw_parsed:
+        return Response({'error': 'parsed output is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    parsed = normalize_parser_output(
+        raw_parsed,
+        vendor_name=request.data.get('vendor_name'),
+    )
+    if not parsed.get('invoices'):
+        return Response({'error': 'no invoices in parsed output'}, status=status.HTTP_400_BAD_REQUEST)
+
+    vendor = None
+    vendor_id = request.data.get('vendor_id')
+    if vendor_id:
+        vendor = Vendor.objects.filter(pk=vendor_id).first()
+
+    email_payload = request.data.get('email_payload') or {}
+    if request.data.get('from') and not email_payload.get('from'):
+        email_payload['from'] = request.data.get('from')
+    if request.data.get('subject') and not email_payload.get('subject'):
+        email_payload['subject'] = request.data.get('subject')
+    if request.data.get('date') and not email_payload.get('date'):
+        email_payload['date'] = request.data.get('date')
+
+    message_id_base = (
+        request.data.get('email_id')
+        or request.data.get('message_id')
+        or (f'pdf_{request.data.get("pdf_filename")}' if request.data.get('pdf_filename') else None)
+        or f'upload_{int(time.time())}'
+    )
+
+    try:
+        saved = persist_parsed_invoices(
+            vendor,
+            email_payload,
+            parsed,
+            message_id_base,
+        )
+    except Exception as exc:
+        logger.exception('Failed to persist parsed invoice')
+        return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return Response({
+        'success': True,
+        'invoice_ids': [invoice.id for invoice in saved],
+        'invoices': InvoiceSerializer(saved, many=True).data,
+        'parsed': parsed,
+    })
+
+
 @api_view(['GET'])
 def google_auth_url(request):
-    authorization_url = get_authorization_url(request)
+    try:
+        authorization_url = get_authorization_url(request)
+    except GoogleOAuthNotConfiguredError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    except Exception as exc:
+        logger.exception('Failed to build Google authorization URL')
+        return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     return Response({'authorization_url': authorization_url})
 
 
@@ -579,8 +678,26 @@ class ContactViewSet(viewsets.ModelViewSet):
         return queryset.order_by('name')
 
 
+class JobViewSet(viewsets.ModelViewSet):
+    queryset = Job.objects.select_related('vendor').all()
+    serializer_class = JobSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        query = self.request.query_params.get('q')
+        if query:
+            queryset = queryset.filter(
+                models.Q(name__icontains=query)
+                | models.Q(job_id__icontains=query)
+                | models.Q(vendor__name__icontains=query)
+            )
+        return queryset.order_by('name')
+
+
 class LineItemViewSet(viewsets.ModelViewSet):
-    queryset = LineItem.objects.select_related('invoice', 'inventory_item', 'item_type').all()
+    queryset = LineItem.objects.select_related(
+        'invoice', 'invoice__vendor', 'job', 'inventory_item', 'item_type'
+    ).all()
     serializer_class = LineItemSerializer
 
     def get_queryset(self):
@@ -593,6 +710,8 @@ class LineItemViewSet(viewsets.ModelViewSet):
                 | models.Q(item_id__icontains=query)
                 | models.Q(invoice__invoice_number__icontains=query)
                 | models.Q(item_type__name__icontains=query)
+                | models.Q(job__name__icontains=query)
+                | models.Q(job__job_id__icontains=query)
             )
         return queryset.order_by('-created_at')
 
