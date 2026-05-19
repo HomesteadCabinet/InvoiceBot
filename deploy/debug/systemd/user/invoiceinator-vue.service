@@ -1,0 +1,14 @@
+[Unit]
+Description=Invoiceinator Vue debug server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Dev/Invoiceinator/invoice-frontend
+ExecStart=/bin/bash -lc 'npm run dev'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

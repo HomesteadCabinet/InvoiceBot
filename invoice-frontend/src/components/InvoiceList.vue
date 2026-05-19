@@ -4,19 +4,106 @@ import { Notify } from 'quasar'
 import VuePdfEmbed from 'vue-pdf-embed'
 import { fetchAPI, postAPI, putAPI } from '../utils/api'
 
+const CONFIG_STORAGE_KEY = 'invoiceinator.invoiceListConfig'
+
+function defaultStoredConfig () {
+  return {
+    rememberFilters: true,
+    rememberPageSize: true,
+    pageSize: 20,
+    filters: {
+      status: null,
+      vendorId: null,
+      dateFrom: '',
+      dateTo: '',
+      search: '',
+    },
+  }
+}
+
+function readStoredConfig () {
+  if (typeof window === 'undefined') {
+    return defaultStoredConfig()
+  }
+
+  try {
+    const raw = window.localStorage.getItem(CONFIG_STORAGE_KEY)
+    if (!raw) {
+      return defaultStoredConfig()
+    }
+
+    const parsed = JSON.parse(raw)
+    return {
+      ...defaultStoredConfig(),
+      ...parsed,
+      filters: {
+        ...defaultStoredConfig().filters,
+        ...(parsed?.filters || {}),
+      },
+    }
+  } catch {
+    return defaultStoredConfig()
+  }
+}
+
+function writeStoredConfig (config) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config))
+}
+
+function captureCurrentFilters () {
+  return {
+    status: filterStatus.value,
+    vendorId: filterVendorId.value,
+    dateFrom: filterDateFrom.value,
+    dateTo: filterDateTo.value,
+    search: searchQuery.value,
+  }
+}
+
+function applyFiltersFromConfig (filters) {
+  filterStatus.value = filters?.status ?? null
+  filterVendorId.value = filters?.vendorId ?? null
+  filterDateFrom.value = filters?.dateFrom ?? ''
+  filterDateTo.value = filters?.dateTo ?? ''
+  searchQuery.value = filters?.search ?? ''
+}
+
+const storedConfig = readStoredConfig()
+
 const emails = ref([])
 const nextPageToken = ref(null)
 const hasMore = ref(false)
-const pageSize = ref(20)
+const pageSize = ref(storedConfig.rememberPageSize ? storedConfig.pageSize : defaultStoredConfig().pageSize)
 const currentPageToken = ref(null)
 const pageTokenStack = ref([])
 const pageIndex = ref(1)
-const filterStatus = ref(null)
-const filterVendorId = ref(null)
-const filterDateFrom = ref('')
-const filterDateTo = ref('')
-const searchQuery = ref('')
+const filterStatus = ref(storedConfig.rememberFilters ? storedConfig.filters.status : null)
+const filterVendorId = ref(storedConfig.rememberFilters ? storedConfig.filters.vendorId : null)
+const filterDateFrom = ref(storedConfig.rememberFilters ? storedConfig.filters.dateFrom : '')
+const filterDateTo = ref(storedConfig.rememberFilters ? storedConfig.filters.dateTo : '')
+const searchQuery = ref(storedConfig.rememberFilters ? storedConfig.filters.search : '')
 const loading = ref(false)
+const configDialogOpen = ref(false)
+const rememberFilters = ref(storedConfig.rememberFilters)
+const rememberPageSize = ref(storedConfig.rememberPageSize)
+const savedFilters = ref({ ...storedConfig.filters })
+const savedPageSize = ref(storedConfig.pageSize)
+const googleConnected = ref(false)
+const googleScopes = ref([])
+const googleLoading = ref(false)
+const automationSettings = ref({
+  auto_process_enabled: false,
+  max_email_age_days: 30,
+  poll_interval_seconds: 60,
+  last_processed_at: null,
+})
+const automationSaving = ref(false)
+const automationRunning = ref(false)
+const exportLoading = ref(false)
 const showProcessingModal = ref(false)
 const currentInvoice = ref(null)
 const selectedVendor = ref('')
@@ -44,6 +131,39 @@ const textData = ref(null)
 const parsedInvoices = ref([])
 const selectedInvoiceIndex = ref(0)
 const tab = ref('pdf')
+const oauthStatus = new URLSearchParams(window.location.search).get('googleAuth')
+const oauthMessage = new URLSearchParams(window.location.search).get('message')
+
+const googleStatusLabel = computed(() => (googleConnected.value ? 'Connected' : 'Not connected'))
+const googleStatusColor = computed(() => (googleConnected.value ? 'positive' : 'grey-6'))
+const oauthBannerClass = computed(() => (
+  oauthStatus === 'success'
+    ? 'bg-positive text-white'
+    : 'bg-negative text-white'
+))
+const oauthBannerMessage = computed(() => {
+  if (oauthStatus === 'success') {
+    return 'Google account connected.'
+  }
+
+  if (oauthStatus === 'error') {
+    return oauthMessage || 'Google authorization failed.'
+  }
+
+  return ''
+})
+const hasOauthBanner = computed(() => Boolean(oauthBannerMessage.value))
+const savedFiltersSummary = computed(() => {
+  const filters = savedFilters.value || {}
+  const parts = [
+    filters.search ? `Search: ${filters.search}` : 'Search: none',
+    filters.status ? `Status: ${filters.status}` : 'Status: all',
+    filters.vendorId ? `Vendor ID: ${filters.vendorId}` : 'Vendor: all',
+    filters.dateFrom ? `From: ${filters.dateFrom}` : 'From: any',
+    filters.dateTo ? `To: ${filters.dateTo}` : 'To: any',
+  ]
+  return parts.join(' · ')
+})
 
 const INVOICE_HEADER_FIELDS = [
   { key: 'invoice_number', label: 'Invoice #' },
@@ -136,6 +256,199 @@ function formatLineItemField(item, field) {
     : item[field.key]
   return formatInvoiceValue(value)
 }
+
+function persistStoredConfig () {
+  writeStoredConfig({
+    rememberFilters: rememberFilters.value,
+    rememberPageSize: rememberPageSize.value,
+    pageSize: savedPageSize.value,
+    filters: { ...savedFilters.value },
+  })
+}
+
+function saveCurrentFilters () {
+  rememberFilters.value = true
+  rememberPageSize.value = true
+  savedFilters.value = captureCurrentFilters()
+  savedPageSize.value = pageSize.value
+  persistStoredConfig()
+  Notify.create({
+    type: 'positive',
+    message: 'Current filters saved on this device',
+  })
+}
+
+function restoreSavedFilters () {
+  rememberFilters.value = true
+  rememberPageSize.value = true
+  applyFiltersFromConfig(savedFilters.value)
+  pageSize.value = savedPageSize.value
+  onFiltersChanged()
+  Notify.create({
+    type: 'positive',
+    message: 'Saved filters restored',
+  })
+}
+
+function resetSavedFilters () {
+  savedFilters.value = { ...defaultStoredConfig().filters }
+  if (!rememberFilters.value) {
+    applyFiltersFromConfig(savedFilters.value)
+  }
+  persistStoredConfig()
+  Notify.create({
+    type: 'positive',
+    message: 'Saved filters cleared',
+  })
+}
+
+async function loadGoogleStatus () {
+  googleLoading.value = true
+  try {
+    const data = await fetchAPI('/api/google/status/')
+    googleConnected.value = Boolean(data.connected)
+    googleScopes.value = data.scopes || []
+  } catch {
+    Notify.create({
+      type: 'negative',
+      message: 'Failed to load Google connection status',
+    })
+  } finally {
+    googleLoading.value = false
+  }
+}
+
+async function loadAutomationSettings () {
+  try {
+    const data = await fetchAPI('/api/automation/settings/')
+    automationSettings.value = {
+      ...automationSettings.value,
+      ...data,
+    }
+  } catch {
+    Notify.create({
+      type: 'negative',
+      message: 'Failed to load automation settings',
+    })
+  }
+}
+
+async function saveAutomationSettings () {
+  automationSaving.value = true
+  try {
+    const data = await putAPI('/api/automation/settings/', automationSettings.value)
+    automationSettings.value = {
+      ...automationSettings.value,
+      ...data,
+    }
+    Notify.create({
+      type: 'positive',
+      message: automationSettings.value.auto_process_enabled
+        ? 'Auto-processing enabled'
+        : 'Auto-processing disabled',
+    })
+  } catch {
+    Notify.create({
+      type: 'negative',
+      message: 'Failed to save automation settings',
+    })
+  } finally {
+    automationSaving.value = false
+  }
+}
+
+async function processInvoicesNow () {
+  automationRunning.value = true
+  try {
+    const data = await postAPI('/api/automation/process-now/', {})
+    Notify.create({
+      type: 'positive',
+      message: `Processed ${data.processed || 0} invoice email(s)`,
+    })
+    await loadEmails()
+    await loadAutomationSettings()
+  } catch {
+    Notify.create({
+      type: 'negative',
+      message: 'Failed to start invoice processing',
+    })
+  } finally {
+    automationRunning.value = false
+  }
+}
+
+async function exportXlsx () {
+  exportLoading.value = true
+  try {
+    const response = await fetch('/api/export/xlsx/', {
+      credentials: 'include',
+    })
+    if (!response.ok) {
+      throw new Error(`Export failed: ${response.status}`)
+    }
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'invoiceinator-export.xlsx'
+    link.click()
+    window.URL.revokeObjectURL(url)
+    Notify.create({
+      type: 'positive',
+      message: 'Export started',
+    })
+  } catch {
+    Notify.create({
+      type: 'negative',
+      message: 'Failed to export XLSX',
+    })
+  } finally {
+    exportLoading.value = false
+  }
+}
+
+async function connectGoogle () {
+  googleLoading.value = true
+  try {
+    const response = await fetch('/api/google/auth-url/', {
+      credentials: 'include',
+    })
+    const data = await response.json()
+    window.location.href = data.authorization_url
+  } catch {
+    googleLoading.value = false
+    Notify.create({
+      type: 'negative',
+      message: 'Failed to start Google authorization',
+    })
+  }
+}
+
+async function disconnectGoogle () {
+  googleLoading.value = true
+  try {
+    await fetchAPI('/api/google/disconnect/', {
+      method: 'POST',
+    })
+    await loadGoogleStatus()
+    Notify.create({
+      type: 'positive',
+      message: 'Google account disconnected',
+    })
+  } catch {
+    Notify.create({
+      type: 'negative',
+      message: 'Failed to disconnect Google account',
+    })
+  } finally {
+    googleLoading.value = false
+  }
+}
+
+function openConfigDialog () {
+  configDialogOpen.value = true
+}
+
 const availableParsers = ref([])
 const currentParser = ref('')
 const selectedParser = ref('')
@@ -171,7 +484,22 @@ watch(columnMappings, (newMappings) => {
 })
 
 watch(pageSize, () => {
+  if (rememberPageSize.value) {
+    savedPageSize.value = pageSize.value
+    persistStoredConfig()
+  }
   onFiltersChanged()
+})
+
+watch([filterStatus, filterVendorId, filterDateFrom, filterDateTo, searchQuery], () => {
+  if (rememberFilters.value) {
+    savedFilters.value = captureCurrentFilters()
+    persistStoredConfig()
+  }
+})
+
+watch([rememberFilters, rememberPageSize], () => {
+  persistStoredConfig()
 })
 
 let searchDebounceTimer = null
@@ -497,9 +825,23 @@ async function saveInvoiceConfig() {
 }
 
 onMounted(() => {
+  if (hasOauthBanner.value) {
+    configDialogOpen.value = true
+    Notify.create({
+      type: oauthStatus === 'success' ? 'positive' : 'negative',
+      message: oauthBannerMessage.value,
+    })
+  }
+
+  if (savedFilters.value && rememberFilters.value) {
+    applyFiltersFromConfig(savedFilters.value)
+  }
+
   loadEmails()
   fetchVendors()
   getParsers()
+  loadGoogleStatus()
+  loadAutomationSettings()
 })
 
 </script>
@@ -511,7 +853,23 @@ onMounted(() => {
         <div class="col-auto">
           <h2 class="q-my-none">Invoice Emails</h2>
         </div>
-        <div class="col-auto">
+        <div class="col-auto row q-gutter-sm">
+          <q-btn
+            outline
+            color="primary"
+            icon="download"
+            label="Export XLSX"
+            :loading="exportLoading"
+            :disable="exportLoading"
+            @click="exportXlsx"
+          />
+          <q-btn
+            outline
+            color="primary"
+            icon="settings"
+            label="Config"
+            @click="openConfigDialog"
+          />
           <q-btn
             color="primary"
             icon="refresh"
@@ -689,6 +1047,195 @@ onMounted(() => {
       </div>
     </div>
   </q-card>
+
+  <q-dialog v-model="configDialogOpen" full-width>
+    <q-card class="config-dialog">
+      <q-card-section class="row items-start q-pb-none">
+        <div>
+          <div class="text-h6">Configuration</div>
+          <div class="text-caption text-grey-7">
+            Google access, table defaults, and persisted local filters.
+          </div>
+        </div>
+        <q-space />
+        <q-btn icon="close" flat round dense v-close-popup />
+      </q-card-section>
+
+      <q-card-section class="q-gutter-md">
+        <q-banner v-if="hasOauthBanner" :class="oauthBannerClass" rounded>
+          {{ oauthBannerMessage }}
+        </q-banner>
+
+        <q-card flat bordered>
+          <q-card-section>
+            <div class="row items-center justify-between q-mb-sm">
+              <div>
+                <div class="text-subtitle1">Google account</div>
+                <div class="text-caption text-grey-7">
+                  Enable Gmail and Sheets access for backend automation.
+                </div>
+              </div>
+              <q-badge :color="googleStatusColor">
+                {{ googleStatusLabel }}
+              </q-badge>
+            </div>
+
+            <div class="text-caption text-grey-7 q-mb-sm">
+              Connected scopes:
+              <span v-if="googleScopes.length">{{ googleScopes.join(', ') }}</span>
+              <span v-else>none</span>
+            </div>
+
+            <div class="row q-gutter-sm">
+              <q-btn
+                color="primary"
+                :label="googleConnected ? 'Reconnect Google' : 'Connect Google'"
+                :loading="googleLoading"
+                :disable="googleLoading"
+                @click="connectGoogle"
+              />
+              <q-btn
+                v-if="googleConnected"
+                outline
+                color="negative"
+                label="Disconnect"
+                :loading="googleLoading"
+                :disable="googleLoading"
+                @click="disconnectGoogle"
+              />
+              <q-btn
+                flat
+                color="primary"
+                label="Refresh status"
+                :disable="googleLoading"
+                @click="loadGoogleStatus"
+              />
+            </div>
+          </q-card-section>
+        </q-card>
+
+        <q-card flat bordered>
+          <q-card-section>
+            <div class="row items-center justify-between q-mb-sm">
+              <div>
+                <div class="text-subtitle1">Auto processing</div>
+                <div class="text-caption text-grey-7">
+                  Poll Gmail in the background and skip emails older than the configured age.
+                </div>
+              </div>
+              <q-toggle
+                v-model="automationSettings.auto_process_enabled"
+                label="Enabled"
+              />
+            </div>
+
+            <div class="row q-col-gutter-md">
+              <div class="col-12 col-sm-6 col-md-4">
+                <q-input
+                  v-model.number="automationSettings.max_email_age_days"
+                  type="number"
+                  min="1"
+                  dense
+                  outlined
+                  label="Max email age (days)"
+                />
+              </div>
+              <div class="col-12 col-sm-6 col-md-4">
+                <q-input
+                  v-model.number="automationSettings.poll_interval_seconds"
+                  type="number"
+                  min="10"
+                  dense
+                  outlined
+                  label="Poll interval (seconds)"
+                />
+              </div>
+            </div>
+
+            <div class="text-caption text-grey-7 q-mt-sm">
+              Last run:
+              {{ automationSettings.last_processed_at || 'never' }}
+            </div>
+
+            <div class="row q-gutter-sm q-mt-md">
+              <q-btn
+                color="primary"
+                :label="automationSettings.auto_process_enabled ? 'Save and keep running' : 'Start auto-processing'"
+                :loading="automationSaving"
+                :disable="automationSaving"
+                @click="saveAutomationSettings"
+              />
+              <q-btn
+                outline
+                color="primary"
+                label="Process now"
+                :loading="automationRunning"
+                :disable="automationRunning"
+                @click="processInvoicesNow"
+              />
+            </div>
+          </q-card-section>
+        </q-card>
+
+        <q-card flat bordered>
+          <q-card-section>
+            <div class="text-subtitle1 q-mb-sm">Local settings</div>
+            <div class="row q-col-gutter-md">
+              <div class="col-12 col-sm-6">
+                <q-toggle
+                  v-model="rememberFilters"
+                  label="Remember filters on this device"
+                />
+              </div>
+              <div class="col-12 col-sm-6">
+                <q-toggle
+                  v-model="rememberPageSize"
+                  label="Remember page size"
+                />
+              </div>
+              <div class="col-12 col-sm-6 col-md-4">
+                <q-select
+                  v-model="pageSize"
+                  :options="PAGE_SIZE_OPTIONS"
+                  dense
+                  outlined
+                  label="Current page size"
+                />
+              </div>
+            </div>
+          </q-card-section>
+        </q-card>
+
+        <q-card flat bordered>
+          <q-card-section>
+            <div class="text-subtitle1 q-mb-sm">Saved filter state</div>
+            <div class="text-caption text-grey-7 q-mb-md">
+              {{ savedFiltersSummary }}
+            </div>
+            <div class="row q-gutter-sm">
+              <q-btn
+                color="primary"
+                label="Save current filters"
+                @click="saveCurrentFilters"
+              />
+              <q-btn
+                outline
+                color="primary"
+                label="Restore saved filters"
+                @click="restoreSavedFilters"
+              />
+              <q-btn
+                flat
+                color="negative"
+                label="Clear saved filters"
+                @click="resetSavedFilters"
+              />
+            </div>
+          </q-card-section>
+        </q-card>
+      </q-card-section>
+    </q-card>
+  </q-dialog>
 
   <!-- Processing Dialog -->
   <q-dialog v-model="showProcessingModal" full-width>
@@ -1164,6 +1711,10 @@ onMounted(() => {
   overflow-y: auto;
 
 
+}
+
+.config-dialog {
+  width: min(920px, 100%);
 }
 
 </style>

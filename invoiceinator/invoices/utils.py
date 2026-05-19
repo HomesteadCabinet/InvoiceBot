@@ -1,27 +1,28 @@
-# utils.py
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 from datetime import datetime
 import logging
-from django.conf import settings
+
+from googleapiclient.discovery import build
+
 from .models import Vendor
+from .google_oauth import load_credentials
 
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly',
-          'https://www.googleapis.com/auth/spreadsheets']
-
 
 def get_gmail_service():
-    creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    creds = load_credentials()
+    if not creds:
+        raise RuntimeError('Google account is not connected. Use the frontend auth button.')
     return build('gmail', 'v1', credentials=creds)
 
 
 def get_sheets_service():
-    creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    creds = load_credentials()
+    if not creds:
+        raise RuntimeError('Google account is not connected. Use the frontend auth button.')
     return build('sheets', 'v4', credentials=creds)
 
 

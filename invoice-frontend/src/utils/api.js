@@ -13,10 +13,14 @@ export async function fetchAPI(endpoint, options = {}) {
       }
     })
 
+    if (response.status === 204) {
+      return null
+    }
+
     // Check if response is JSON
     const contentType = response.headers.get('content-type')
     if (!contentType || !contentType.includes('application/json')) {
-      throw new Error('Response was not JSON')
+      return null
     }
 
     if (!response.ok) {
@@ -51,6 +55,13 @@ export async function putAPI(endpoint, data, options = {}) {
   return fetchAPI(endpoint, {
     method: 'PUT',
     body: JSON.stringify(data),
+    ...options
+  })
+}
+
+export async function deleteAPI(endpoint, options = {}) {
+  return fetchAPI(endpoint, {
+    method: 'DELETE',
     ...options
   })
 }

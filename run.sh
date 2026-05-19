@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Pyenv-virtualenv configuration for InvoiceBot.
+# Pyenv-virtualenv configuration for Invoiceinator.
 PYTHON_VERSION="3.12.9"
 VENV_NAME="invoiceinator"
 PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"

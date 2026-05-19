@@ -2,10 +2,34 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
-from .utils import get_gmail_service, get_sheets_service
-from .models import ProcessedEmail, Vendor, VendorEmail
-from .serializers import VendorSerializer
+from .utils import get_gmail_service
+from .google_oauth import (
+    build_frontend_redirect,
+    disconnect_credentials,
+    exchange_authorization_code,
+    get_authorization_url,
+    get_connection_status,
+)
+from .models import Contact, Invoice, InventoryItem, ItemType, LineItem, ProcessedEmail, Vendor, VendorEmail
+from .serializers import (
+    ContactSerializer,
+    InvoiceAutomationSettingsSerializer,
+    InvoiceSerializer,
+    InventoryItemSerializer,
+    ItemTypeSerializer,
+    LineItemSerializer,
+    VendorSerializer,
+)
+from .services import (
+    export_invoices_workbook,
+    get_automation_settings,
+    process_gmail_message,
+    process_pending_gmail_invoices,
+    update_automation_settings,
+)
 from django.conf import settings
+from django.http import HttpResponseRedirect, HttpResponse
+from django.db import models
 import os
 from datetime import datetime
 import logging
@@ -185,6 +209,13 @@ def _email_matches_vendor_id(item_vendor_id, vendor_id_filter):
     return item_vendor_id == wanted
 
 
+def _google_connection_error_response(exc):
+    return Response(
+        {'error': str(exc), 'connected': False},
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 def _serialize_list_email(service, message_id, processed=None):
     email = service.users().messages().get(userId='me', id=message_id).execute()
     attachment_count = 0
@@ -232,7 +263,10 @@ def _serialize_list_email(service, message_id, processed=None):
 
 @api_view(['GET'])
 def list_invoice_emails(request):
-    service = get_gmail_service()
+    try:
+        service = get_gmail_service()
+    except RuntimeError as exc:
+        return _google_connection_error_response(exc)
     page_token = request.GET.get('pageToken') or None
     try:
         page_size = int(request.GET.get('maxResults', DEFAULT_EMAIL_PAGE_SIZE))
@@ -303,139 +337,25 @@ def list_invoice_emails(request):
 @api_view(['POST'])
 def process_invoice_email(request):
     email_id = request.data.get('email_id')
-    service = get_gmail_service()
-    email = service.users().messages().get(userId='me', id=email_id).execute()
-    vendor_name = "Unknown"
-    errors = []
-    attachments = []
-    invoice_data = {"attachments": [], "tables": [], "text": ""}
+    try:
+        service = get_gmail_service()
+    except RuntimeError as exc:
+        return _google_connection_error_response(exc)
+    try:
+        result = process_gmail_message(service, email_id)
+        vendor = None
+        if result.get('processed_email') and result['processed_email'].vendor_id:
+            vendor = result['processed_email'].vendor
 
-    # Extract sender email from headers
-    from_header = next((header['value'] for header in email['payload']['headers'] if header['name'].lower() == 'from'), None)
-    if from_header:
-        # Extract email address from the from_header (handles both "Name <email@domain.com>" and "email@domain.com" formats)
-        email_match = re.search(r'<(.+?)>|([^<\s]+@[^>\s]+)', from_header)
-        if email_match:
-            sender_email = email_match.group(1) or email_match.group(2)
-
-            # Special handling for emails from specific domains
-            if any(sender_email.endswith(f'@{domain}') for domain in SPECIAL_EMAIL_DOMAINS):
-                # Extract the name before the email address
-                name_match = re.search(r'^(.+?)\s*<', from_header)
-                if name_match:
-                    vendor_name = name_match.group(1).strip()
-                else:
-                    # Fallback to domain-based name if no name found
-                    domain_match = re.search(r'@(.+?)\.[^.]+$', sender_email)
-                    vendor_name = domain_match.group(1).title() if domain_match else "Unknown"
-            else:
-                # Original domain-based name extraction for other emails
-                domain_match = re.search(r'@(.+?)\.[^.]+$', sender_email)
-                vendor_name = domain_match.group(1).title() if domain_match else "Unknown"
-
-            try:
-                # Create or update vendor
-                vendor, created = Vendor.objects.update_or_create(
-                    name=vendor_name,
-                    defaults={
-                        'invoice_type': 'pdf'  # Default to PDF, can be updated later
-                    }
-                )
-
-                # Create or update vendor email
-                VendorEmail.objects.update_or_create(
-                    email=sender_email,
-                    defaults={
-                        'vendor': vendor,
-                        'is_primary': True
-                    }
-                )
-            except Exception as e:
-                errors.append(f"Error creating/updating vendor: {str(e)}")
-
-    # Create media directory if it doesn't exist
-    media_dir = settings.MEDIA_ROOT
-    os.makedirs(media_dir, exist_ok=True)
-
-    for part in email['payload']['parts']:
-        if part.get('filename'):
-            try:
-                attachment = service.users().messages().attachments().get(
-                    userId='me', messageId=email_id, id=part['body']['attachmentId']).execute()
-
-                # Decode the attachment data
-                file_data = base64.urlsafe_b64decode(attachment['data'].encode('UTF-8'))
-
-                # Create a unique filename using email_id and original filename
-                original_filename = part['filename']
-                file_extension = os.path.splitext(original_filename)[1]
-                # Sanitize the filename by replacing spaces and special characters
-                safe_filename = re.sub(r'[^a-zA-Z0-9.-]', '_', original_filename)
-                unique_filename = f"{email_id}_{safe_filename}"
-                file_path = os.path.join(media_dir, unique_filename)
-
-                # Save the file
-                with open(file_path, 'wb') as f:
-                    f.write(file_data)
-
-                # Get the file URL - properly encode the filename
-                file_url = request.build_absolute_uri(f'/media/{unique_filename}')
-
-                attachment_info = {
-                    'filename': unique_filename,
-                    'mimeType': part['mimeType'],
-                    'size': part['body'].get('size', 0),
-                    'url': file_url
-                }
-                attachments.append(attachment_info)
-                invoice_data["attachments"] = attachments
-
-                # Extract data from PDF using vendor-specific rules if available
-                # extractor = DataExtractor(file_path, debug=True)
-
-                # Extract all tables from the PDF and add to invoice_data
-                # all_tables = []
-                # try:
-                #     # tables = extractor.extract_tables()
-                #     # text = extractor.extract_text()
-
-                #     # Get table areas and parsing method from vendor rules if available
-                #     table_areas = None
-                #     parsing_method = 'hybrid'  # Default parsing method
-
-                #     # image = extractor.generate_debug_image(table_areas=table_areas, parsing_method=parsing_method)
-                #     print(f"Extracted text length: {len(text) if text else 0}")  # Debug print
-                #     # invoice_data['tables'] = tables
-                #     # invoice_data['text'] = text
-                #     # invoice_data['image'] = image
-                # except Exception as e:
-                #     print(f"Error during extraction: {str(e)}")  # Debug print
-                #     errors.append(f"Error extracting data: {str(e)}")
-
-                # If vendor rules exist, also extract data using those rules
-                if vendor:
-                    extracted_data = extractor.extract_data([])
-                    invoice_data['vendor_extracted_data'] = extracted_data
-
-                # Create or update ProcessedEmail record
-                ProcessedEmail.objects.update_or_create(
-                    email_id=email_id,
-                    defaults={
-                        'status': 'processed',
-                        'processed': datetime.now(),
-                        'data': invoice_data
-                    }
-                )
-
-            except Exception as e:
-                errors.append(f"Error downloading attachment {part.get('filename')}: {str(e)}")
-
-    return Response({
-        'status': 'processed' if not errors else 'partial',
-        'invoice': invoice_data,
-        'vendor': VendorSerializer(vendor).data if vendor else None,
-        'errors': errors
-    })
+        return Response({
+            'status': result.get('status', 'error'),
+            'invoice': result.get('parsed', {}).get('invoices', [{}])[0] if result.get('parsed') else {},
+            'vendor': VendorSerializer(vendor).data if vendor else None,
+            'errors': [] if result.get('status') == 'processed' else [result.get('reason', 'Processing failed')],
+        })
+    except Exception as exc:
+        logger.exception('Failed to process invoice email %s', email_id)
+        return Response({'status': 'error', 'errors': [str(exc)]}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
@@ -522,6 +442,161 @@ def test_parser(request):
         )
 
 
+@api_view(['GET'])
+def google_auth_url(request):
+    authorization_url = get_authorization_url(request)
+    return Response({'authorization_url': authorization_url})
+
+
+@api_view(['GET'])
+def google_oauth_callback(request):
+    try:
+        exchange_authorization_code(request)
+        redirect_url = build_frontend_redirect({'googleAuth': 'success'})
+    except Exception as exc:
+        logger.exception('Google OAuth callback failed')
+        redirect_url = build_frontend_redirect({
+            'googleAuth': 'error',
+            'message': str(exc),
+        })
+
+    return HttpResponseRedirect(redirect_url)
+
+
+@api_view(['GET'])
+def google_auth_status(request):
+    return Response(get_connection_status())
+
+
+@api_view(['POST'])
+def google_disconnect(request):
+    disconnect_credentials()
+    return Response({'connected': False})
+
+
+@api_view(['GET', 'PUT'])
+def automation_settings_view(request):
+    if request.method == 'GET':
+        serializer = InvoiceAutomationSettingsSerializer(get_automation_settings())
+        return Response(serializer.data)
+
+    serializer = InvoiceAutomationSettingsSerializer(
+        get_automation_settings(),
+        data=request.data,
+        partial=True,
+    )
+    serializer.is_valid(raise_exception=True)
+    settings_obj = update_automation_settings(**serializer.validated_data)
+    return Response(InvoiceAutomationSettingsSerializer(settings_obj).data)
+
+
+@api_view(['POST'])
+def process_invoices_now(request):
+    limit = request.data.get('limit')
+    try:
+        limit = int(limit) if limit is not None else None
+    except (TypeError, ValueError):
+        limit = None
+    try:
+        return Response(process_pending_gmail_invoices(limit=limit))
+    except RuntimeError as exc:
+        return _google_connection_error_response(exc)
+
+
+@api_view(['GET'])
+def export_invoices_xlsx(request):
+    workbook_bytes = export_invoices_workbook()
+    response = HttpResponse(
+        workbook_bytes,
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    response['Content-Disposition'] = 'attachment; filename="invoiceinator-export.xlsx"'
+    return response
+
+
+class InvoiceViewSet(viewsets.ModelViewSet):
+    queryset = Invoice.objects.select_related('vendor', 'contact').prefetch_related('line_items').all()
+    serializer_class = InvoiceSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        query = self.request.query_params.get('q')
+        if query:
+            queryset = queryset.filter(
+                models.Q(invoice_number__icontains=query)
+                | models.Q(source_email_subject__icontains=query)
+                | models.Q(source_email_from__icontains=query)
+                | models.Q(vendor__name__icontains=query)
+                | models.Q(contact__name__icontains=query)
+            )
+        return queryset.order_by('-received_at', '-processed_at', '-created_at')
+
+
+class InventoryItemViewSet(viewsets.ModelViewSet):
+    queryset = InventoryItem.objects.select_related('vendor', 'item_type').all()
+    serializer_class = InventoryItemSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        query = self.request.query_params.get('q')
+        if query:
+            queryset = queryset.filter(
+                models.Q(name__icontains=query)
+                | models.Q(item_key__icontains=query)
+                | models.Q(item_id__icontains=query)
+                | models.Q(vendor__name__icontains=query)
+                | models.Q(item_type__name__icontains=query)
+            )
+        return queryset.order_by('name', 'item_key')
+
+
+class ItemTypeViewSet(viewsets.ModelViewSet):
+    queryset = ItemType.objects.all()
+    serializer_class = ItemTypeSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        query = self.request.query_params.get('q')
+        if query:
+            queryset = queryset.filter(name__icontains=query)
+        return queryset.order_by('name')
+
+
+class ContactViewSet(viewsets.ModelViewSet):
+    queryset = Contact.objects.select_related('vendor').all()
+    serializer_class = ContactSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        query = self.request.query_params.get('q')
+        if query:
+            queryset = queryset.filter(
+                models.Q(name__icontains=query)
+                | models.Q(email__icontains=query)
+                | models.Q(phone__icontains=query)
+                | models.Q(vendor__name__icontains=query)
+            )
+        return queryset.order_by('name')
+
+
+class LineItemViewSet(viewsets.ModelViewSet):
+    queryset = LineItem.objects.select_related('invoice', 'inventory_item', 'item_type').all()
+    serializer_class = LineItemSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        query = self.request.query_params.get('q')
+        if query:
+            queryset = queryset.filter(
+                models.Q(name__icontains=query)
+                | models.Q(description__icontains=query)
+                | models.Q(item_id__icontains=query)
+                | models.Q(invoice__invoice_number__icontains=query)
+                | models.Q(item_type__name__icontains=query)
+            )
+        return queryset.order_by('-created_at')
+
+
 class VendorViewSet(viewsets.ModelViewSet):
     """
     A ViewSet for viewing and editing vendors.
@@ -540,10 +615,10 @@ class VendorViewSet(viewsets.ModelViewSet):
         Optionally filter by name
         """
         queryset = Vendor.objects.all()
-        name = self.request.query_params.get('name', None)
-        if name is not None:
-            queryset = queryset.filter(name__icontains=name)
-        return queryset
+        query = self.request.query_params.get('q') or self.request.query_params.get('name')
+        if query:
+            queryset = queryset.filter(name__icontains=query)
+        return queryset.order_by('name')
 
     @action(detail=False, methods=['get'])
     def get_invoice_parsers(self, request):

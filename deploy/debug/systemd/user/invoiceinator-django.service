@@ -1,0 +1,17 @@
+[Unit]
+Description=Invoiceinator Django debug server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Dev/Invoiceinator/invoiceinator
+Environment=PYENV_ROOT=%h/.pyenv
+Environment=PATH=%h/.pyenv/bin:%h/.pyenv/shims:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=pyenv exec python manage.py runserver 0.0.0.0:9999
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
