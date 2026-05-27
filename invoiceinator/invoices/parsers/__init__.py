@@ -14,15 +14,22 @@ Each line item: id, name, description, qty, unit, unit_price, total_price,
 width, length, height.
 """
 
+from .advanced_machinery import parse_advanced_machinery_invoice
 from .allmoxy import parse_allmoxy_invoice
 from .american_saw import parse_american_saw_invoice
 from .bitdefender import parse_bitdefender_invoice
 from .crexendo import parse_crexendo_invoice
 from .edgebanding_services import parse_edgebanding_services_invoice
+from .element_designs import parse_element_designs_invoice
+from .generic import parse_generic_invoice
 from .hafele import parse_hafele_invoice
 from .high_mountain import parse_high_mountain_invoice
+from .mcmaster_carr import parse_mcmaster_carr_invoice
 from .industrial_tool_supply import parse_industrial_tool_supply_invoice
 from .intermountain import parse_intermountain_invoice
+from .ipaco import parse_ipaco_invoice
+from .rugby import parse_rugby_invoice
+from .weinig import parse_weinig_invoice
 from .schema import (
     INVOICE_FIELDS,
     LINE_ITEM_ALIASES,
@@ -34,11 +41,14 @@ from .schema import (
     normalize_invoice,
     normalize_line_item,
     normalize_parser_output,
+    normalize_quantity,
     to_float,
 )
 from .sierra import parse_sierra_invoice
+from .sherwin import parse_sherwin_invoice
 from .wi_fiber import parse_wi_fiber_invoice
 from .wurth import parse_wurth_invoice
+from .yates_mouldings import parse_yates_mouldings_invoice
 
 __all__ = [
     "INVOICE_FIELDS",
@@ -51,35 +61,54 @@ __all__ = [
     "normalize_invoice",
     "normalize_line_item",
     "normalize_parser_output",
+    "normalize_quantity",
     "to_float",
     "list_invoice_parsers",
+    "parse_advanced_machinery_invoice",
     "parse_allmoxy_invoice",
     "parse_american_saw_invoice",
     "parse_bitdefender_invoice",
     "parse_crexendo_invoice",
     "parse_edgebanding_services_invoice",
+    "parse_element_designs_invoice",
+    "parse_generic_invoice",
     "parse_hafele_invoice",
     "parse_high_mountain_invoice",
+    "parse_mcmaster_carr_invoice",
     "parse_industrial_tool_supply_invoice",
     "parse_intermountain_invoice",
+    "parse_ipaco_invoice",
+    "parse_rugby_invoice",
+    "parse_weinig_invoice",
     "parse_sierra_invoice",
+    "parse_sherwin_invoice",
     "parse_wi_fiber_invoice",
     "parse_wurth_invoice",
+    "parse_yates_mouldings_invoice",
 ]
 
 _PARSER_FUNCTIONS = [
+    parse_advanced_machinery_invoice,
     parse_allmoxy_invoice,
     parse_american_saw_invoice,
     parse_bitdefender_invoice,
     parse_crexendo_invoice,
     parse_edgebanding_services_invoice,
+    parse_element_designs_invoice,
+    parse_generic_invoice,
     parse_hafele_invoice,
     parse_high_mountain_invoice,
+    parse_mcmaster_carr_invoice,
     parse_industrial_tool_supply_invoice,
     parse_intermountain_invoice,
+    parse_ipaco_invoice,
+    parse_rugby_invoice,
+    parse_weinig_invoice,
     parse_sierra_invoice,
+    parse_sherwin_invoice,
     parse_wi_fiber_invoice,
     parse_wurth_invoice,
+    parse_yates_mouldings_invoice,
 ]
 
 

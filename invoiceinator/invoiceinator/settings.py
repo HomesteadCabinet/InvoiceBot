@@ -173,6 +173,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [],
     'DEFAULT_PERMISSION_CLASSES': [],
+    'DEFAULT_PAGINATION_CLASS': 'invoices.pagination.DefaultPageNumberPagination',
+    'PAGE_SIZE': 20,
+    'DEFAULT_FILTER_BACKENDS': ['rest_framework.filters.OrderingFilter'],
 }
 
 # Admin site settings

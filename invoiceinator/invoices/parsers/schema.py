@@ -1,5 +1,6 @@
 """Standard invoice schema: fields, normalization, line items."""
 
+from decimal import Decimal, InvalidOperation
 import re
 
 INVOICE_FIELDS = (
@@ -27,9 +28,11 @@ LINE_ITEM_ALIASES = {
     "width": ("width", "Width"),
     "length": ("length", "Length"),
     "height": ("height", "Height"),
-    "job": ("job", "Job", "job_name"),
-    "job_id": ("job_id", "Job ID", "Job Id"),
+    "job": ("job", "Job", "job_name", "jobName", "Job Name"),
+    "job_id": ("job_id", "job_number", "jobNumber", "Job ID", "Job Id", "Job Number"),
 }
+
+MAX_DECIMAL_12_4 = Decimal("99999999.9999")
 
 HEADER_ALIASES = {
     "invoice_number": ("invoice_number", "Invoice Number", "invoice number"),
@@ -38,7 +41,18 @@ HEADER_ALIASES = {
     "vendor_name": ("vendor_name", "Vendor Name"),
     "invoice_total": ("invoice_total", "Invoice Total"),
     "invoice_due_date": ("invoice_due_date", "Invoice Due Date"),
-    "cust_po": ("cust_po", "Cust PO", "cust po"),
+    "cust_po": (
+        "cust_po",
+        "customer_po",
+        "customerPO",
+        "po",
+        "po_number",
+        "Cust PO",
+        "cust po",
+        "Customer PO",
+        "PO Number",
+        "P.O. Number",
+    ),
     "line_items": ("line_items", "Line Items"),
 }
 
@@ -72,6 +86,23 @@ def to_float(value):
         return float(s)
     except ValueError:
         return 0.0
+
+
+def normalize_quantity(value, default="1"):
+    if value is None or value == "":
+        return default
+
+    text = str(value).strip().replace(",", "")
+    try:
+        parsed = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return "0"
+
+    if parsed.copy_abs() > MAX_DECIMAL_12_4:
+        return "0"
+
+    normalized = format(parsed.normalize(), "f")
+    return normalized.rstrip("0").rstrip(".") if "." in normalized else normalized
 
 
 def normalize_dimension(value):
@@ -189,7 +220,7 @@ def make_line_item(
         "description": str(description or ""),
         "job": str(job or ""),
         "job_id": str(job_id or ""),
-        "qty": str(qty or "1"),
+        "qty": normalize_quantity(qty),
         "unit": str(unit or ""),
         "unit_price": to_float(unit_price),
         "total_price": to_float(total_price),
@@ -249,6 +280,7 @@ def _parse_stacked_qty_um_block(block, unit_map):
     repeated UM, unit price (4 decimal places).
     """
     qty, unit = block[0].split(maxsplit=1)
+    qty = normalize_quantity(qty)
     qty_f = to_float(qty)
     item_id = ""
     description_lines = []

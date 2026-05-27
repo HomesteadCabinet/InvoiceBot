@@ -1,6 +1,7 @@
 from django.contrib import admin
 from .models import (
     Contact,
+    EmailMessageCache,
     Invoice,
     InvoiceAutomationSettings,
     InventoryItem,
@@ -10,6 +11,14 @@ from .models import (
     ProcessedEmail,
     Vendor,
 )
+
+
+@admin.register(EmailMessageCache)
+class EmailMessageCacheAdmin(admin.ModelAdmin):
+    list_display = ('email_id', 'from_header', 'vendor', 'attachment_count', 'attachment_filename', 'last_seen_at')
+    list_filter = ('vendor',)
+    search_fields = ('email_id', 'from_header', 'subject', 'snippet')
+    readonly_fields = ('created_at', 'updated_at')
 
 
 @admin.register(ProcessedEmail)
@@ -22,15 +31,28 @@ class ProcessedEmailAdmin(admin.ModelAdmin):
 
 @admin.register(Vendor)
 class VendorAdmin(admin.ModelAdmin):
-    list_display = ('name', 'invoice_type')
-    list_filter = ('invoice_type',)
-    search_fields = ('name',)
+    list_display = ('name', 'ignore', 'invoice_type', 'email', 'phone', 'city', 'parser')
+    list_filter = ('ignore', 'invoice_type')
+    search_fields = ('name', 'email', 'city', 'parser')
+    fieldsets = (
+        (None, {
+            'fields': ('ignore', 'name', 'logo', 'invoice_type', 'parser'),
+        }),
+        ('Contact', {
+            'fields': ('email', 'phone', 'website'),
+        }),
+        ('Address', {
+            'fields': ('address', 'city', 'state', 'zip_code', 'country'),
+        }),
+    )
 
 
 @admin.register(ItemType)
 class ItemTypeAdmin(admin.ModelAdmin):
-    list_display = ('name', 'color')
-    search_fields = ('name',)
+    list_display = ('name', 'parent', 'icon', 'color')
+    list_filter = ('parent',)
+    search_fields = ('name', 'parent__name')
+    autocomplete_fields = ('parent',)
 
 
 @admin.register(Job)
@@ -61,8 +83,8 @@ class InvoiceAdmin(admin.ModelAdmin):
 
 @admin.register(LineItem)
 class LineItemAdmin(admin.ModelAdmin):
-    list_display = ('invoice', 'item_id', 'name', 'job', 'item_type', 'qty', 'total_price')
-    search_fields = ('item_id', 'name', 'description')
+    list_display = ('invoice', 'item_id', 'name', 'received', 'job', 'item_type', 'qty', 'total_price')
+    search_fields = ('item_id', 'name', 'description', 'notes')
 
 
 @admin.register(InventoryItem)

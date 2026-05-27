@@ -40,8 +40,7 @@ def write_to_spreadsheet(invoice_data: dict, vendor: Vendor = None) -> None:
     try:
         sheets_service = get_sheets_service()
 
-        # Get column mappings from vendor
-        column_mappings = vendor.spreadsheet_column_mapping if vendor else {}
+        column_mappings = {}
 
         # Create a row with empty values for all columns up to the highest mapped column
         max_col = 'A'

@@ -24,6 +24,11 @@ PDF_PARSER_MAP = {
     "generic.pdf": "parse_american_saw_invoice",
     "hm1.pdf": "parse_high_mountain_invoice",
     "hm2.pdf": "parse_high_mountain_invoice",
+    "McMaster_Carr1.PDF": "parse_mcmaster_carr_invoice",
+    "McMaster_Carr2.PDF": "parse_mcmaster_carr_invoice",
+    "McMaster_Carr3.PDF": "parse_mcmaster_carr_invoice",
+    "McMaster_Carr4.PDF": "parse_mcmaster_carr_invoice",
+    "McMaster_Carr5.PDF": "parse_mcmaster_carr_invoice",
     "industrial_tool_supply.pdf": "parse_industrial_tool_supply_invoice",
     "im2.pdf": "parse_intermountain_invoice",
     "im3.pdf": "parse_intermountain_invoice",
@@ -32,6 +37,10 @@ PDF_PARSER_MAP = {
     "se3.pdf": "parse_sierra_invoice",
     "sierra.pdf": "parse_sierra_invoice",
     "wi-fiber.pdf": "parse_wi_fiber_invoice",
+    "YATES_MOULDINGS1.pdf": "parse_yates_mouldings_invoice",
+    "YATES_MOULDINGS2.pdf": "parse_yates_mouldings_invoice",
+    "YATES_MOULDINGS3.pdf": "parse_yates_mouldings_invoice",
+    "YATES_MOULDINGS4.pdf": "parse_yates_mouldings_invoice",
 }
 
 EDGEBANDING_EXPECTED = {
@@ -110,6 +119,172 @@ WURTH_INVOICE_COUNTS = {
     "wurth6.pdf": 4,
 }
 
+MCMASTER_EXPECTED = {
+    "McMaster_Carr1.PDF": {
+        "invoice_number": "62816707",
+        "invoice_total": "118.72",
+        "item_count": 2,
+    },
+    "McMaster_Carr2.PDF": {
+        "invoice_number": "63537683",
+        "invoice_total": "78.03",
+        "item_count": 4,
+    },
+    "McMaster_Carr3.PDF": {
+        "invoice_number": "64677198",
+        "invoice_total": "96.03",
+        "item_count": 4,
+    },
+    "McMaster_Carr4.PDF": {
+        "invoice_number": "65143433",
+        "invoice_total": "327.23",
+        "item_count": 1,
+    },
+    "McMaster_Carr5.PDF": {
+        "invoice_number": "7920515",
+        "invoice_total": "166.82",
+        "item_count": 2,
+    },
+}
+
+RUGBY_INVOICE_COUNTS = {
+    "rugby1.pdf": 2,
+    "rugby2.pdf": 1,
+    "rugby3.pdf": 3,
+    "rugby4.pdf": 1,
+}
+
+IPACO_EXPECTED = {
+    "ipaco1.pdf": {
+        "invoice_number": "PS557500",
+        "invoice_total": "25.11",
+        "item_count": 2,
+    },
+    "ipaco2.pdf": {
+        "invoice_count": 2,
+        "invoice_totals": ["45.94", "41.18"],
+    },
+    "ipaco3.pdf": {
+        "invoice_number": "BL95086",
+        "invoice_total": "4487.28",
+        "item_count": 2,
+    },
+    "ipaco4.pdf": {
+        "invoice_number": "BL95383",
+        "invoice_total": "561.18",
+        "item_count": 3,
+    },
+    "ipaco5.pdf": {
+        "invoice_number": "PS550499",
+        "invoice_total": "7.73",
+        "item_count": 1,
+    },
+}
+
+SHERWIN_EXPECTED = {
+    "sherwin1.pdf": {
+        "invoice_number": "95512105181225",
+        "invoice_total": "126.51",
+        "item_count": 1,
+    },
+    "sherwin2.pdf": {
+        "invoice_number": "0260-6",
+        "invoice_total": "164.76",
+        "item_count": 2,
+    },
+    "sherwin3.pdf": {
+        "invoice_number": "08926126650126",
+        "invoice_total": "164.76",
+        "item_count": 2,
+    },
+    "sherwin4.pdf": {
+        "invoice_number": "25714126650326",
+        "invoice_total": "219.69",
+        "item_count": 2,
+    },
+    "sherwin5.pdf": {
+        "invoice_number": "36430126650526",
+        "invoice_total": "109.84",
+        "item_count": 2,
+    },
+}
+
+WEINIG_EXPECTED = {
+    "weinig1.pdf": {
+        "invoice_number": "1193770",
+        "invoice_total": "621.15",
+        "item_count": 11,
+    },
+    "weinig2.pdf": {
+        "invoice_number": "1193770",
+        "invoice_total": "621.15",
+        "item_count": 1,
+    },
+    "weinig3.pdf": {
+        "invoice_number": "1199657",
+        "invoice_total": "903.15",
+        "item_count": 6,
+    },
+}
+
+ADVANCED_MACHINERY_EXPECTED = {
+    "advanced_machinery_1.pdf": {
+        "invoice_number": "002571",
+        "invoice_total": "1943.21",
+        "cust_po": "Jordan",
+        "item_count": 4,
+        "item_ids": {"SHARP-LEITZ", "220000214", "Freight"},
+    },
+    "advanced_machinery_2.pdf": {
+        "invoice_number": "002971",
+        "invoice_total": "1113.35",
+        "item_count": 2,
+        "item_ids": {"60-123EC", "Freight"},
+    },
+    "advanced_machinery_3.pdf": {
+        "invoice_number": "003313",
+        "invoice_total": "709.32",
+        "cust_po": "Bart",
+        "item_count": 2,
+        "item_ids": {"60-123MC", "Freight"},
+    },
+}
+
+ELEMENT_DESIGNS_EXPECTED = {
+    "element_designs1.pdf": {
+        "invoice_number": "230896-1",
+        "invoice_total": "1074.57",
+        "cust_po": "25897-Roehrich / ED-0003077",
+        "item_count": 5,
+        "job_id": "25897",
+    },
+    "element_designs2.pdf": {
+        "invoice_number": "230050-1",
+        "invoice_total": "1620.92",
+        "cust_po": "25893-DeLaguardia",
+        "item_count": 5,
+        "job_id": "25893",
+    },
+    "element_designs3.pdf": {
+        "invoice_number": "230087-1",
+        "invoice_total": "1280.91",
+        "cust_po": "25841-Malikowski (CP)",
+        "item_count": 7,
+        "job_id": "25841",
+    },
+    "element_designs4.pdf": {
+        "invoice_number": "231898-1",
+        "invoice_total": "0.00",
+        "cust_po": "REPL: 25893-DeLaguardia",
+        "item_count": 6,
+    },
+}
+
+ADVANCED_MACHINERY_STATEMENT_COUNTS = {
+    "advanced_machinery_Statement.pdf": 2,
+    "advanced_machinery_4.pdf": 1,
+}
+
 HAFELE_EXPECTED = {
     "hafele1.pdf": {
         "invoice_number": "513005816",
@@ -179,6 +354,24 @@ for _pdf in sorted(os.listdir(_test_dir)):
         PDF_PARSER_MAP[_pdf] = "parse_edgebanding_services_invoice"
     if _pdf.lower().startswith("hafele") and _pdf.lower().endswith(".pdf"):
         PDF_PARSER_MAP[_pdf] = "parse_hafele_invoice"
+    if _pdf.lower().startswith("advanced_machinery") and _pdf.lower().endswith(".pdf"):
+        PDF_PARSER_MAP[_pdf] = "parse_advanced_machinery_invoice"
+    if _pdf.lower().startswith("element_designs") and _pdf.lower().endswith(".pdf"):
+        PDF_PARSER_MAP[_pdf] = "parse_element_designs_invoice"
+    if _pdf.lower().startswith("rugby") and _pdf.lower().endswith(".pdf"):
+        PDF_PARSER_MAP[_pdf] = "parse_rugby_invoice"
+    if _pdf.lower().startswith("weinig") and _pdf.lower().endswith(".pdf"):
+        PDF_PARSER_MAP[_pdf] = "parse_weinig_invoice"
+    if _pdf.lower().startswith("ipaco") and _pdf.lower().endswith(".pdf"):
+        PDF_PARSER_MAP[_pdf] = "parse_ipaco_invoice"
+    if _pdf.lower().startswith("sherwin") and _pdf.lower().endswith(".pdf"):
+        PDF_PARSER_MAP[_pdf] = "parse_sherwin_invoice"
+    if _pdf.lower().startswith("mcmaster_carr") and _pdf.lower().endswith(".pdf"):
+        PDF_PARSER_MAP[_pdf] = "parse_mcmaster_carr_invoice"
+    if _pdf.lower().startswith("yates_mouldings") and _pdf.lower().endswith(".pdf"):
+        PDF_PARSER_MAP[_pdf] = "parse_yates_mouldings_invoice"
+    if _pdf.lower().endswith(".pdf") and _pdf not in PDF_PARSER_MAP:
+        PDF_PARSER_MAP[_pdf] = "parse_generic_invoice"
 
 # Seller name between Invoice # and Bill To (when present in the PDF)
 ALLMOXY_EXPECTED_VENDOR = {
@@ -440,6 +633,133 @@ def validate_result(result, pdf_name=None, pdf_path=None):
         validate_wurth_bundle(result, pdf_name=pdf_name)
         return
 
+    if pdf_name and pdf_name.lower().startswith("advanced_machinery"):
+        stmt_count = ADVANCED_MACHINERY_STATEMENT_COUNTS.get(pdf_name)
+        if stmt_count is not None:
+            if len(result["invoices"]) != stmt_count:
+                raise AssertionError(
+                    f"expected {stmt_count} statement invoices, got {len(result['invoices'])}"
+                )
+            for inv in result["invoices"]:
+                if not inv.get("invoice_number"):
+                    raise AssertionError("statement row missing invoice_number")
+                if not inv.get("invoice_total"):
+                    raise AssertionError("statement row missing invoice_total")
+            return
+
+    if pdf_name and pdf_name.lower().startswith("rugby"):
+        expected_count = RUGBY_INVOICE_COUNTS.get(pdf_name)
+        if expected_count is not None and len(result["invoices"]) != expected_count:
+            raise AssertionError(
+                f"expected {expected_count} Rugby invoices, got {len(result['invoices'])}"
+            )
+        for inv in result["invoices"]:
+            if not inv.get("invoice_number"):
+                raise AssertionError("Rugby invoice missing invoice_number")
+            if not inv.get("line_items"):
+                raise AssertionError("Rugby invoice missing line_items")
+        return
+
+    if pdf_name and pdf_name.lower().startswith("weinig"):
+        expected = WEINIG_EXPECTED.get(pdf_name)
+        if expected is not None and len(result["invoices"]) != 1:
+            raise AssertionError(
+                f"expected 1 Weinig invoice, got {len(result['invoices'])}"
+            )
+        invoice = result["invoices"][0]
+        if invoice.get("invoice_number") != expected["invoice_number"]:
+            raise AssertionError(
+                f"invoice_number {invoice.get('invoice_number')!r} != {expected['invoice_number']!r}"
+            )
+        if abs(float(invoice.get("invoice_total") or 0) - float(expected["invoice_total"])) > 0.02:
+            raise AssertionError(
+                f"invoice_total {invoice.get('invoice_total')!r} != {expected['invoice_total']!r}"
+            )
+        if len(invoice.get("line_items") or []) != expected["item_count"]:
+            raise AssertionError(
+                f"expected {expected['item_count']} line items, got {len(invoice.get('line_items') or [])}"
+            )
+        return
+
+    if pdf_name and pdf_name.lower().startswith("mcmaster_carr"):
+        expected = MCMASTER_EXPECTED.get(pdf_name)
+        if expected is None:
+            raise AssertionError(f"missing MCMASTER_EXPECTED for {pdf_name}")
+        if len(result["invoices"]) != 1:
+            raise AssertionError(
+                f"expected 1 McMaster invoice, got {len(result['invoices'])}"
+            )
+        invoice = result["invoices"][0]
+        if invoice.get("invoice_number") != expected["invoice_number"]:
+            raise AssertionError(
+                f"invoice_number {invoice.get('invoice_number')!r} != {expected['invoice_number']!r}"
+            )
+        if abs(float(invoice.get("invoice_total") or 0) - float(expected["invoice_total"])) > 0.02:
+            raise AssertionError(
+                f"invoice_total {invoice.get('invoice_total')!r} != {expected['invoice_total']!r}"
+            )
+        if len(invoice.get("line_items") or []) != expected["item_count"]:
+            raise AssertionError(
+                f"expected {expected['item_count']} line items, got {len(invoice.get('line_items') or [])}"
+            )
+        return
+
+    if pdf_name and pdf_name.lower().startswith("ipaco"):
+        expected = IPACO_EXPECTED.get(pdf_name)
+        if expected is None:
+            raise AssertionError(f"missing IPACO_EXPECTED for {pdf_name}")
+        if 'invoice_count' in expected:
+            if len(result["invoices"]) != expected["invoice_count"]:
+                raise AssertionError(
+                    f"expected {expected['invoice_count']} invoices, got {len(result['invoices'])}"
+                )
+            if [invoice["invoice_total"] for invoice in result["invoices"]] != expected["invoice_totals"]:
+                raise AssertionError(
+                    f"invoice totals {[invoice['invoice_total'] for invoice in result['invoices']]} != {expected['invoice_totals']}"
+                )
+            return
+        if len(result["invoices"]) != 1:
+            raise AssertionError(
+                f"expected 1 IPACO invoice, got {len(result['invoices'])}"
+            )
+        invoice = result["invoices"][0]
+        if invoice.get("invoice_number") != expected["invoice_number"]:
+            raise AssertionError(
+                f"invoice_number {invoice.get('invoice_number')!r} != {expected['invoice_number']!r}"
+            )
+        if abs(float(invoice.get("invoice_total") or 0) - float(expected["invoice_total"])) > 0.02:
+            raise AssertionError(
+                f"invoice_total {invoice.get('invoice_total')!r} != {expected['invoice_total']!r}"
+            )
+        if len(invoice.get("line_items") or []) != expected["item_count"]:
+            raise AssertionError(
+                f"expected {expected['item_count']} line items, got {len(invoice.get('line_items') or [])}"
+            )
+        return
+
+    if pdf_name and pdf_name.lower().startswith("sherwin"):
+        expected = SHERWIN_EXPECTED.get(pdf_name)
+        if expected is None:
+            raise AssertionError(f"missing SHERWIN_EXPECTED for {pdf_name}")
+        if len(result["invoices"]) != 1:
+            raise AssertionError(
+                f"expected 1 Sherwin invoice, got {len(result['invoices'])}"
+            )
+        invoice = result["invoices"][0]
+        if invoice.get("invoice_number") != expected["invoice_number"]:
+            raise AssertionError(
+                f"invoice_number {invoice.get('invoice_number')!r} != {expected['invoice_number']!r}"
+            )
+        if abs(float(invoice.get("invoice_total") or 0) - float(expected["invoice_total"])) > 0.02:
+            raise AssertionError(
+                f"invoice_total {invoice.get('invoice_total')!r} != {expected['invoice_total']!r}"
+            )
+        if len(invoice.get("line_items") or []) != expected["item_count"]:
+            raise AssertionError(
+                f"expected {expected['item_count']} line items, got {len(invoice.get('line_items') or [])}"
+            )
+        return
+
     if len(result["invoices"]) != 1:
         raise AssertionError(
             f"expected 1 invoice, got {len(result['invoices'])}"
@@ -519,6 +839,76 @@ def validate_result(result, pdf_name=None, pdf_path=None):
                 raise AssertionError(
                     f"name {item.get('name')!r} missing {expected_eb['name_contains']!r}"
                 )
+
+    expected_ed = ELEMENT_DESIGNS_EXPECTED.get(pdf_name)
+    if expected_ed:
+        if not invoice["line_items"]:
+            raise AssertionError("expected at least one line item")
+        if invoice.get("invoice_number") != expected_ed["invoice_number"]:
+            raise AssertionError(
+                f"invoice_number {invoice.get('invoice_number')!r} != "
+                f"{expected_ed['invoice_number']!r}"
+            )
+        if invoice.get("cust_po") != expected_ed["cust_po"]:
+            raise AssertionError(
+                f"cust_po {invoice.get('cust_po')!r} != {expected_ed['cust_po']!r}"
+            )
+        exp_total = float(expected_ed["invoice_total"])
+        got_total = float(invoice.get("invoice_total") or 0)
+        if abs(got_total - exp_total) > 0.02:
+            raise AssertionError(
+                f"invoice_total {got_total!r} != {exp_total!r}"
+            )
+        if len(invoice["line_items"]) != expected_ed["item_count"]:
+            raise AssertionError(
+                f"expected {expected_ed['item_count']} line items, "
+                f"got {len(invoice['line_items'])}"
+            )
+        line_sum = sum(float(item["total_price"]) for item in invoice["line_items"])
+        if abs(line_sum - got_total) > 0.02:
+            raise AssertionError(
+                f"line item total {line_sum:.2f} != invoice_total {got_total:.2f}"
+            )
+        job_id = expected_ed.get("job_id")
+        if job_id and invoice["line_items"][0].get("job_id") != job_id:
+            raise AssertionError(
+                f"job_id {invoice['line_items'][0].get('job_id')!r} != {job_id!r}"
+            )
+
+    expected_am = ADVANCED_MACHINERY_EXPECTED.get(pdf_name)
+    if expected_am:
+        if not invoice["line_items"]:
+            raise AssertionError("expected at least one line item")
+        if invoice.get("invoice_number") != expected_am["invoice_number"]:
+            raise AssertionError(
+                f"invoice_number {invoice.get('invoice_number')!r} != "
+                f"{expected_am['invoice_number']!r}"
+            )
+        if "cust_po" in expected_am and invoice.get("cust_po") != expected_am["cust_po"]:
+            raise AssertionError(
+                f"cust_po {invoice.get('cust_po')!r} != {expected_am['cust_po']!r}"
+            )
+        exp_total = float(expected_am["invoice_total"])
+        got_total = float(invoice.get("invoice_total") or 0)
+        if abs(got_total - exp_total) > 0.02:
+            raise AssertionError(
+                f"invoice_total {got_total!r} != {exp_total!r}"
+            )
+        if len(invoice["line_items"]) != expected_am["item_count"]:
+            raise AssertionError(
+                f"expected {expected_am['item_count']} line items, "
+                f"got {len(invoice['line_items'])}"
+            )
+        line_sum = sum(float(item["total_price"]) for item in invoice["line_items"])
+        if abs(line_sum - got_total) > 0.02:
+            raise AssertionError(
+                f"line item total {line_sum:.2f} != invoice_total {got_total:.2f}"
+            )
+        item_ids = expected_am.get("item_ids")
+        if item_ids:
+            found_ids = {item["id"] for item in invoice["line_items"]}
+            if not item_ids <= found_ids:
+                raise AssertionError(f"missing item ids: {item_ids - found_ids}")
 
     expected_hafele = HAFELE_EXPECTED.get(pdf_name)
     if expected_hafele:
@@ -600,8 +990,6 @@ def validate_result(result, pdf_name=None, pdf_path=None):
             raise AssertionError(
                 f"line item total {line_sum:.2f} != subtotal {subtotal:.2f}"
             )
-
-
 def main():
     test_dir = os.path.dirname(os.path.abspath(__file__))
     failures = []

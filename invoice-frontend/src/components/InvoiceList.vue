@@ -3,6 +3,9 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { Dialog, Notify } from 'quasar'
 import VuePdfEmbed from 'vue-pdf-embed'
 import { fetchAPI, postAPI, putAPI } from '../utils/api'
+import { dragPanDirective } from '../utils/dragPan'
+import { notifyCrudChanged } from '../utils/crudSync'
+import { formatTypedValue } from '../utils/formatters'
 
 const CONFIG_STORAGE_KEY = 'invoiceinator.invoiceListConfig'
 
@@ -73,6 +76,7 @@ function applyFiltersFromConfig (filters) {
 }
 
 const storedConfig = readStoredConfig()
+const vDragPan = dragPanDirective
 
 const emails = ref([])
 const nextPageToken = ref(null)
@@ -107,6 +111,7 @@ const automationSettings = ref({
 const automationSaving = ref(false)
 const automationRunning = ref(false)
 const exportLoading = ref(false)
+const resetLoading = ref(false)
 const showProcessingModal = ref(false)
 const currentInvoice = ref(null)
 const selectedVendor = ref('')
@@ -119,13 +124,16 @@ const STATUS_OPTIONS = [
   { label: 'All statuses', value: null },
   { label: 'Pending', value: 'pending' },
   { label: 'Processed', value: 'processed' },
+  { label: 'Incorrect parsing', value: 'incorrect_parsing' },
   { label: 'Error', value: 'error' },
 ]
+
+const emailContextMenu = ref(null)
+const contextMenuRow = ref(null)
 const abortController = ref(null)
 const activeVendor = ref(null)
 const pdfContainer = ref(null)
 const pdfPageCount = ref(0)
-const columnMappings = ref({})
 const displayData = ref(null)
 const _showDataModal = ref(false)
 const modalTitle = ref('')
@@ -168,30 +176,6 @@ const savedFiltersSummary = computed(() => {
   return parts.join(' · ')
 })
 
-const INVOICE_HEADER_FIELDS = [
-  { key: 'invoice_number', label: 'Invoice #' },
-  { key: 'vendor_name', label: 'Vendor' },
-  { key: 'ship_date', label: 'Ship Date' },
-  { key: 'date_ordered', label: 'Date Ordered' },
-  { key: 'invoice_due_date', label: 'Due Date' },
-  { key: 'invoice_total', label: 'Total' },
-  { key: 'cust_po', label: 'Customer PO' },
-]
-
-const LINE_ITEM_FIELDS = [
-  { key: 'id', label: 'ID' },
-  { key: 'job_id', label: 'Job ID' },
-  { key: 'job', label: 'Job Name' },
-  { key: 'name', label: 'Name' },
-  { key: 'description', label: 'Description' },
-  { key: 'width', label: 'Width' },
-  { key: 'length', label: 'Length / Height', altKey: 'height' },
-  { key: 'qty', label: 'Qty' },
-  { key: 'unit', label: 'Unit' },
-  { key: 'unit_price', label: 'Unit Price' },
-  { key: 'total_price', label: 'Total' },
-]
-
 function parserResultInvoices(result) {
   if (!result?.invoices?.length) {
     return []
@@ -218,48 +202,160 @@ const vendorFilterOptions = computed(() => [
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100]
 
 const tableColumns = [
-  { name: 'from', label: 'From', field: 'from', align: 'left', sortable: false },
-  { name: 'vendor_name', label: 'Vendor', field: row => row.vendor_name || 'N/A', align: 'left', sortable: false },
-  { name: 'date', label: 'Date', field: 'date', align: 'right', sortable: false },
-  { name: 'snippet', label: 'Subject', field: 'snippet', align: 'left', sortable: false },
-  { name: 'status', label: 'Status', field: 'status', align: 'center', sortable: false },
+  { name: 'from', label: 'From', field: 'from', align: 'left', sortable: true },
+  { name: 'vendor_name', label: 'Vendor', field: row => row.vendor_name || 'N/A', align: 'left', sortable: true },
+  { name: 'date', label: 'Date', field: 'date', align: 'right', sortable: true },
+  { name: 'snippet', label: 'Subject', field: 'snippet', align: 'left', sortable: true },
+  { name: 'status', label: 'Status', field: 'status', align: 'center', sortable: true },
   { name: 'actions', label: '', field: 'id', align: 'center', sortable: false },
 ]
 
 function statusBadgeColor(emailStatus) {
   if (emailStatus === 'error') return 'negative'
   if (emailStatus === 'processed') return 'positive'
+  if (emailStatus === 'incorrect_parsing') return 'deep-orange'
   return 'warning'
 }
 
 function statusLabel(emailStatus) {
-  return emailStatus || 'pending'
+  const labels = {
+    pending: 'Pending',
+    processed: 'Processed',
+    error: 'Error',
+    incorrect_parsing: 'Incorrect parsing',
+  }
+  return labels[emailStatus] || emailStatus || 'Pending'
 }
 
 function rowClassFn(row) {
   if (row.status === 'error') return 'invoice-row--error'
   if (row.status === 'processed') return 'invoice-row--processed'
+  if (row.status === 'incorrect_parsing') return 'invoice-row--incorrect-parsing'
   return 'invoice-row--pending'
 }
 
-function formatInvoiceValue(value) {
-  if (value === null || value === undefined || value === '') {
-    return '—'
+function onEmailContextMenu(evt, row) {
+  contextMenuRow.value = row
+  emailContextMenu.value?.show(evt)
+}
+
+async function flagIncorrectParsing(row) {
+  if (!row?.id) {
+    return
   }
-  if (typeof value === 'number') {
-    if (Number.isInteger(value)) {
-      return String(value)
+  try {
+    const data = await postAPI('/api/emails/flag-incorrect-parsing/', { email_id: row.id })
+    const emailIndex = emails.value.findIndex(e => e.id === row.id)
+    if (emailIndex !== -1) {
+      emails.value[emailIndex] = {
+        ...emails.value[emailIndex],
+        status: data.status || 'incorrect_parsing',
+      }
     }
-    return String(parseFloat(value.toFixed(4)))
+    Notify.create({
+      type: 'positive',
+      message: 'Marked as incorrect parsing',
+    })
+  } catch (error) {
+    console.error('Failed to flag incorrect parsing:', error)
+    Notify.create({
+      type: 'negative',
+      message: error?.message || 'Failed to flag incorrect parsing',
+    })
   }
-  return String(value)
+}
+
+function onEmailRowClick(evt, row) {
+  if (evt?.type === 'contextmenu') {
+    return
+  }
+  processEmail(row.id)
+}
+
+function formatInvoiceValue(value, type) {
+  return formatTypedValue(value, type)
+}
+
+function invoiceJobSummary(invoice) {
+  const jobValues = [...new Set(
+    (invoice?.line_items || [])
+      .map(item => [item.job_id, item.job].filter(Boolean).join(' • '))
+      .filter(Boolean),
+  )]
+  const resolvedJob = jobValues.length === 1 ? jobValues[0] : ''
+  const po = invoice?.cust_po || ''
+
+  return {
+    label: resolvedJob ? 'Job' : 'Customer PO',
+    value: resolvedJob || po || '—',
+  }
+}
+
+function invoiceDateSummary(invoice) {
+  return [
+    { label: 'Date Ordered', value: formatInvoiceValue(invoice?.date_ordered) },
+    { label: 'Ship Date', value: formatInvoiceValue(invoice?.ship_date) },
+    { label: 'Due Date', value: formatInvoiceValue(invoice?.invoice_due_date) },
+  ]
+}
+
+function parsedInvoiceDetailRows (invoice) {
+  const job = invoiceJobSummary(invoice)
+  return [job, ...invoiceDateSummary(invoice)].filter(
+    row => row.value && row.value !== '—',
+  )
 }
 
 function formatLineItemField(item, field) {
   const value = field.altKey
     ? (item[field.key] ?? item[field.altKey])
     : item[field.key]
-  return formatInvoiceValue(value)
+  return formatInvoiceValue(value, field.type)
+}
+
+function lineItemTitle (item) {
+  const parts = []
+  for (const value of [item.id, item.name, item.description]) {
+    const text = value == null ? '' : String(value).trim()
+    if (!text) {
+      continue
+    }
+    if (!parts.some(existing => existing.toLowerCase() === text.toLowerCase())) {
+      parts.push(text)
+    }
+  }
+  return parts.join(' · ') || '—'
+}
+
+function lineItemMeta (item) {
+  const parts = []
+  const job = [item.job_id, item.job].filter(value => value != null && String(value).trim() !== '').join(' ')
+  if (job) {
+    parts.push(job)
+  }
+  const width = item.width != null && item.width !== '' ? item.width : null
+  const length = item.length ?? item.height
+  const lengthText = length != null && length !== '' ? length : null
+  if (width || lengthText) {
+    parts.push([width, lengthText].filter(Boolean).join('×'))
+  }
+  if (item.unit) {
+    parts.push(item.unit)
+  }
+  const unitPrice = item.unit_price != null && item.unit_price !== ''
+    ? formatInvoiceValue(item.unit_price, 'currency')
+    : ''
+  if (unitPrice) {
+    parts.push(`@ ${unitPrice}`)
+  }
+  return parts.join(' · ')
+}
+
+function formatLineItemQty (item) {
+  if (item.qty == null || item.qty === '') {
+    return '—'
+  }
+  return formatInvoiceValue(item.qty, 'number')
 }
 
 function persistStoredConfig () {
@@ -341,7 +437,7 @@ async function loadAutomationSettings () {
   }
 }
 
-async function saveAutomationSettings () {
+async function saveAutomationSettings (previousSettings = null) {
   automationSaving.value = true
   try {
     const data = await putAPI('/api/automation/settings/', automationSettings.value)
@@ -356,6 +452,9 @@ async function saveAutomationSettings () {
         : 'Auto-processing disabled',
     })
   } catch {
+    if (previousSettings) {
+      automationSettings.value = { ...previousSettings }
+    }
     Notify.create({
       type: 'negative',
       message: 'Failed to save automation settings',
@@ -363,6 +462,19 @@ async function saveAutomationSettings () {
   } finally {
     automationSaving.value = false
   }
+}
+
+async function toggleAutomationEnabled (value) {
+  if (automationSaving.value) {
+    return
+  }
+
+  const previousSettings = { ...automationSettings.value }
+  automationSettings.value = {
+    ...automationSettings.value,
+    auto_process_enabled: value,
+  }
+  await saveAutomationSettings(previousSettings)
 }
 
 async function processInvoicesNow () {
@@ -382,6 +494,108 @@ async function processInvoicesNow () {
     })
   } finally {
     automationRunning.value = false
+  }
+}
+
+function resetProcessingState () {
+  currentInvoice.value = null
+  parsedInvoices.value = []
+  selectedInvoiceIndex.value = 0
+  tableData.value = null
+  textData.value = null
+  status.value = ''
+  pdfError.value = null
+  pdfLoading.value = false
+  pdfPageCount.value = 0
+  tab.value = 'pdf'
+  showProcessingModal.value = false
+}
+
+async function resetAllProcessedData () {
+  const resetMode = await new Promise((resolve) => {
+    Dialog.create({
+      title: 'Reset invoice data',
+      message: 'Choose what to clear. The default keeps vendors and item types.',
+      options: {
+        type: 'radio',
+        model: 'imported',
+        items: [
+          {
+            label: 'Reset imported data only',
+            value: 'imported',
+            color: 'negative',
+          },
+          {
+            label: 'Remove everything',
+            value: 'all',
+            color: 'negative',
+          },
+        ],
+      },
+      cancel: true,
+      persistent: true,
+      ok: { label: 'Reset selected data', color: 'negative' },
+    }).onOk((value) => resolve(value)).onCancel(() => resolve(null))
+  })
+
+  if (!resetMode) {
+    return
+  }
+
+  const removeAll = resetMode === 'all'
+  if (removeAll) {
+    const confirmed = await new Promise((resolve) => {
+      Dialog.create({
+        title: 'Remove everything?',
+        message: 'This deletes vendors, item types, contacts, jobs, email caches, invoices, inventory, processed emails, automation settings, and stored PDFs.',
+        cancel: true,
+        persistent: true,
+        ok: { label: 'Remove everything', color: 'negative' },
+      }).onOk(() => resolve(true)).onCancel(() => resolve(false))
+    })
+
+    if (!confirmed) {
+      return
+    }
+  }
+
+  if (!removeAll) {
+    const confirmed = await new Promise((resolve) => {
+      Dialog.create({
+        title: 'Reset imported data?',
+        message: 'This deletes email caches, processed emails, contacts, jobs, invoices, inventory, and stored PDFs. Vendors and item types will remain.',
+        cancel: true,
+        persistent: true,
+        ok: { label: 'Reset imported data', color: 'negative' },
+      }).onOk(() => resolve(true)).onCancel(() => resolve(false))
+    })
+
+    if (!confirmed) {
+      return
+    }
+  }
+
+  resetLoading.value = true
+  try {
+    const data = await postAPI('/api/automation/reset-data/', { remove_all: removeAll })
+    resetProcessingState()
+    await loadEmails()
+    await fetchVendors()
+    notifyCrudChanged()
+    Notify.create({
+      type: 'positive',
+      message: removeAll
+        ? `Removed all data and ${data.deleted_files || 0} PDF file(s)`
+        : `Cleared imported data and ${data.deleted_files || 0} PDF file(s); vendors and item types were preserved`,
+    })
+  } catch (error) {
+    console.error('Failed to reset invoice data:', error)
+    Notify.create({
+      type: 'negative',
+      message: 'Failed to reset invoice data',
+    })
+  } finally {
+    resetLoading.value = false
   }
 }
 
@@ -506,27 +720,18 @@ watch(selectedVendor, async (newSelectedVendor) => {
     const selectedVendor = vendors.value.find(v => v.id === newSelectedVendor.id)
     if (selectedVendor) {
       activeVendor.value = selectedVendor
-      // Load column mappings from vendor
-      columnMappings.value = selectedVendor.spreadsheet_column_mapping || {}
       // Set selectedParser based on vendor's parser
       if (selectedVendor.parser) {
         selectedParser.value = availableParsers.value.find(p => p.method === selectedVendor.parser) || ''
       }
     } else {
       activeVendor.value = null
-      columnMappings.value = {}
       selectedParser.value = ''
     }
   } else {
     activeVendor.value = null
-    columnMappings.value = {}
     selectedParser.value = ''
   }
-})
-
-// Add watch for columnMappings changes
-watch(columnMappings, (newMappings) => {
-  console.log('Column mappings updated:', newMappings)
 })
 
 watch(pageSize, () => {
@@ -676,11 +881,11 @@ async function loadEmails(pageToken = null) {
 
 async function fetchVendors() {
   try {
-    const data = await fetchAPI('/api/vendors/')
-    // Add label and value props for v-select component
-    vendors.value = data.map(vendor => ({
+    const data = await fetchAPI('/api/vendors/?page_size=200&active_only=1')
+    const list = Array.isArray(data) ? data : (Array.isArray(data?.results) ? data.results : [])
+    vendors.value = list.map(vendor => ({
       ...vendor,
-    })) || []
+    }))
   } catch (error) {
     console.error('Error fetching vendors:', error)
   }
@@ -1066,6 +1271,7 @@ onMounted(() => {
       </q-card>
 
       <q-table
+        v-drag-pan
         :rows="emails"
         :columns="tableColumns"
         row-key="id"
@@ -1076,7 +1282,8 @@ onMounted(() => {
         hide-pagination
         no-data-label="No invoice emails match your filters"
         :table-row-class-fn="rowClassFn"
-        @row-click="(_evt, row) => processEmail(row.id)"
+        @row-click="onEmailRowClick"
+        @row-contextmenu="onEmailContextMenu"
       >
         <template #body-cell-snippet="props">
           <q-td :props="props" class="cursor-pointer">
@@ -1119,6 +1326,29 @@ onMounted(() => {
           </q-td>
         </template>
       </q-table>
+
+      <q-menu ref="emailContextMenu" context-menu touch-position>
+        <q-list dense style="min-width: 200px">
+          <q-item
+            v-if="contextMenuRow"
+            v-close-popup
+            clickable
+            :disable="contextMenuRow.status === 'incorrect_parsing'"
+            @click="flagIncorrectParsing(contextMenuRow)"
+          >
+            <q-item-section avatar>
+              <q-icon name="flag" color="deep-orange" />
+            </q-item-section>
+            <q-item-section>
+              {{
+                contextMenuRow.status === 'incorrect_parsing'
+                  ? 'Already flagged incorrect parsing'
+                  : 'Flag incorrect parsing'
+              }}
+            </q-item-section>
+          </q-item>
+        </q-list>
+      </q-menu>
 
       <div class="row items-center justify-between q-mt-md q-gutter-sm">
         <div class="col-auto row items-center q-gutter-sm">
@@ -1249,8 +1479,10 @@ onMounted(() => {
                 </div>
               </div>
               <q-toggle
-                v-model="automationSettings.auto_process_enabled"
+                :model-value="automationSettings.auto_process_enabled"
                 label="Enabled"
+                :disable="automationSaving"
+                @update:model-value="toggleAutomationEnabled"
               />
             </div>
 
@@ -1263,6 +1495,7 @@ onMounted(() => {
                   dense
                   outlined
                   label="Max email age (days)"
+                  :disable="automationSaving"
                 />
               </div>
               <div class="col-12 col-sm-6 col-md-4">
@@ -1273,6 +1506,7 @@ onMounted(() => {
                   dense
                   outlined
                   label="Poll interval (seconds)"
+                  :disable="automationSaving"
                 />
               </div>
             </div>
@@ -1358,6 +1592,28 @@ onMounted(() => {
             </div>
           </q-card-section>
         </q-card>
+
+        <q-card flat bordered>
+          <q-card-section>
+            <div class="row items-center justify-between q-mb-sm">
+              <div>
+                <div class="text-subtitle1">Danger zone</div>
+                <div class="text-caption text-grey-7">
+                  Reset imported invoice data by default, or choose a full wipe that removes vendors and item types too.
+                </div>
+              </div>
+              <q-btn
+                color="negative"
+                outline
+                icon="restart_alt"
+                label="Reset data"
+                :loading="resetLoading"
+                :disable="resetLoading"
+                @click="resetAllProcessedData"
+              />
+            </div>
+          </q-card-section>
+        </q-card>
       </q-card-section>
     </q-card>
   </q-dialog>
@@ -1374,16 +1630,8 @@ onMounted(() => {
       <q-card-section class="processing-dialog__body q-pt-sm">
         <div class="row processing-dialog__content">
           <!-- Left side: PDF iframe -->
-          <div class="col-12 col-md-8 processing-dialog__pdf-col">
+          <div class="col-12 col-md-7 processing-dialog__pdf-col">
             <q-card class="processing-dialog__panel">
-              <q-card-section class="q-py-sm">
-                <div class="row">
-                  <div class="col">
-                    <!-- Removed title from here -->
-                  </div>
-                </div>
-              </q-card-section>
-
               <!-- Add Tabs -->
               <q-tabs
                 v-model="tab"
@@ -1459,22 +1707,22 @@ onMounted(() => {
           </div>
 
           <!-- Right side: Form controls -->
-          <div class="col-12 col-md-4 processing-dialog__form-col">
+          <div class="col-12 col-md-5 processing-dialog__form-col">
             <q-card class="processing-dialog__panel processing-dialog__form-panel">
               <q-card-section class="q-py-sm processing-dialog__form-header">
                 <div class="text-h6">Invoice Parser</div>
               </q-card-section>
-              <q-card-section class="column data-rules-card processing-dialog__form-body">
-                <div class="col-auto">
-                  <div class="col-12 q-mb-sm">
+              <q-card-section class="row data-rules-card processing-dialog__form-body">
+                <div class="col-12">
+                  <div class="q-mb-sm">
                     <q-input
                       v-model="currentInvoice.email"
                       label="Email"
                       dense
                       outlined
+
                     />
                   </div>
-
                   <div class="row">
                     <div class="col-6">
                       <q-select
@@ -1518,81 +1766,105 @@ onMounted(() => {
                   </div>
                 </div>
 
-                <div class="parsed-results processing-dialog__parsed-results">
+                <div class="col-12 parsed-results processing-dialog__parsed-results">
                   <template v-if="parsedInvoice">
-                    <q-tabs
-                      v-if="parsedInvoices.length > 1"
-                      v-model="selectedInvoiceIndex"
-                      dense
-                      class="q-mb-sm"
-                      active-color="primary"
-                      indicator-color="primary"
-                      align="left"
-                      narrow-indicator
-                      outside-arrows
-                      mobile-arrows
-                    >
-                      <q-tab
-                        v-for="(inv, idx) in parsedInvoices"
-                        :key="idx"
-                        :name="idx"
-                        :label="inv.invoice_number || `Invoice ${idx + 1}`"
-                      />
-                    </q-tabs>
-                    <div class="text-subtitle2 q-mb-sm">
-                      Extracted Invoice
-                      <span
+                    <div class="parsed-invoice-details">
+                      <q-tabs
                         v-if="parsedInvoices.length > 1"
-                        class="text-grey-7 text-caption"
+                        v-model="selectedInvoiceIndex"
+                        dense
+                        class="parsed-invoice-details__tabs"
+                        active-color="primary"
+                        indicator-color="primary"
+                        align="left"
+                        narrow-indicator
+                        outside-arrows
+                        mobile-arrows
                       >
-                        ({{ selectedInvoiceIndex + 1 }} of {{ parsedInvoices.length }})
-                      </span>
-                    </div>
-                    <q-list dense bordered separator class="rounded-borders bg-white">
-                      <q-item
-                        v-for="field in INVOICE_HEADER_FIELDS"
-                        :key="field.key"
-                      >
-                        <q-item-section>
-                          <q-item-label caption>{{ field.label }}</q-item-label>
-                          <q-item-label>{{ formatInvoiceValue(parsedInvoice[field.key]) }}</q-item-label>
-                        </q-item-section>
-                      </q-item>
-                    </q-list>
+                        <q-tab
+                          v-for="(inv, idx) in parsedInvoices"
+                          :key="idx"
+                          :name="idx"
+                          :label="inv.invoice_number || `Invoice ${idx + 1}`"
+                        />
+                      </q-tabs>
 
-                    <div v-if="parsedInvoice.line_items?.length" class="q-mt-md">
-                      <div class="text-subtitle2 q-mb-sm">
-                        Line Items ({{ parsedInvoice.line_items.length }})
+                      <div class="parsed-invoice-details__header">
+                        <div class="parsed-invoice-details__title">
+                          <span>
+                            {{ parsedInvoice.invoice_number || 'Extracted invoice' }}
+                          </span>
+                          <span
+                            v-if="parsedInvoices.length > 1"
+                            class="text-caption text-grey-7 q-ml-xs"
+                          >
+                            {{ selectedInvoiceIndex + 1 }}/{{ parsedInvoices.length }}
+                          </span>
+                        </div>
+                        <div class="parsed-invoice-details__total">
+                          {{ formatInvoiceValue(parsedInvoice.invoice_total, 'currency') }}
+                        </div>
                       </div>
-                      <q-card
-                        v-for="(item, index) in parsedInvoice.line_items"
-                        :key="index"
-                        flat
-                        bordered
-                        class="q-mb-sm"
+
+                      <dl
+                        v-if="parsedInvoiceDetailRows(parsedInvoice).length"
+                        class="parsed-invoice-details__meta"
                       >
-                        <q-card-section class="q-pa-sm">
-                          <div class="text-caption text-grey-7 q-mb-xs">
-                            Item {{ index + 1 }}
-                          </div>
-                          <q-list dense>
-                            <q-item
-                              v-for="field in LINE_ITEM_FIELDS"
-                              :key="field.key"
+                        <template
+                          v-for="row in parsedInvoiceDetailRows(parsedInvoice)"
+                          :key="row.label"
+                        >
+                          <dt>{{ row.label }}</dt>
+                          <dd>{{ row.value }}</dd>
+                        </template>
+                      </dl>
+
+                      <div v-if="parsedInvoice.line_items?.length" class="parsed-line-items">
+                        <div class="parsed-line-items__heading text-caption text-grey-7">
+                          {{ parsedInvoice.line_items.length }} line item{{ parsedInvoice.line_items.length === 1 ? '' : 's' }}
+                        </div>
+                        <q-markup-table
+                          dense
+                          flat
+                          wrap-cells
+                          class="parsed-line-items__table"
+                        >
+                          <thead>
+                            <tr>
+                              <th class="parsed-line-items__col-idx">#</th>
+                              <th>Item</th>
+                              <th class="parsed-line-items__col-qty text-right">Qty</th>
+                              <th class="parsed-line-items__col-total text-right">Total</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr
+                              v-for="(item, index) in parsedInvoice.line_items"
+                              :key="index"
                             >
-                              <q-item-section side class="text-grey-7" style="min-width: 5.5rem">
-                                {{ field.label }}
-                              </q-item-section>
-                              <q-item-section>
-                                {{ formatLineItemField(item, field) }}
-                              </q-item-section>
-                            </q-item>
-                          </q-list>
-                        </q-card-section>
-                      </q-card>
-                    </div>
-                    <div v-else class="text-grey-7 q-mt-md">
-                      No line items extracted
+                              <td class="parsed-line-items__idx">{{ index + 1 }}</td>
+                              <td>
+                                <div class="parsed-line-items__title">{{ lineItemTitle(item) }}</div>
+                                <div
+                                  v-if="lineItemMeta(item)"
+                                  class="parsed-line-items__meta text-grey-7"
+                                >
+                                  {{ lineItemMeta(item) }}
+                                </div>
+                              </td>
+                              <td class="parsed-line-items__qty text-right">
+                                {{ formatLineItemQty(item) }}
+                              </td>
+                              <td class="parsed-line-items__price text-right">
+                                {{ formatLineItemField(item, { key: 'total_price', type: 'currency' }) }}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </q-markup-table>
+                      </div>
+                      <div v-else class="text-caption text-grey-7 q-mt-sm">
+                        No line items extracted
+                      </div>
                     </div>
                   </template>
                   <template v-else-if="textData">
@@ -1736,6 +2008,10 @@ onMounted(() => {
   background-color: rgba($positive, 0.12);
 }
 
+.invoice-row--incorrect-parsing {
+  background-color: rgba($deep-orange, 0.12);
+}
+
 .invoice-row--pending {
   //ckground-color: rgba($warning, 0.12);
 }
@@ -1843,18 +2119,7 @@ onMounted(() => {
     padding: 0;
   }
 
-  .q-table {
-    th {
-      font-size: 0.8rem;
-      line-height: 1;
-    }
 
-    td {
-      font-size: 0.9rem;
-      line-height: 1;
-      vertical-align: middle;
-    }
-  }
 }
 
 // Ensure tab panels have consistent height
@@ -1867,8 +2132,137 @@ onMounted(() => {
 }
 
 .parsed-results {
-  max-width: 22rem;
   overflow-y: auto;
+}
+
+.parsed-invoice-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.parsed-invoice-details__tabs {
+  margin-bottom: 0;
+}
+
+.parsed-invoice-details__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  line-height: 1.25;
+}
+
+.parsed-invoice-details__title {
+  min-width: 0;
+  font-size: 0.8rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.parsed-invoice-details__total {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.parsed-invoice-details__meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.3;
+
+  dt {
+    margin: 0;
+    color: $grey-7;
+    white-space: nowrap;
+  }
+
+  dd {
+    margin: 0;
+    text-align: right;
+    word-break: break-word;
+  }
+}
+
+.parsed-line-items__heading {
+  margin-bottom: 0.15rem;
+}
+
+.parsed-line-items__table {
+  width: 100%;
+  font-size: 0.8rem;
+  background: transparent;
+
+  thead th {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: $grey-7;
+    padding: 0.15rem 0.35rem 0.25rem;
+    line-height: 1.2;
+    border: none;
+    background: transparent;
+  }
+
+  tbody td {
+    padding: 0.2rem 0.35rem;
+    line-height: 1.25;
+    vertical-align: top;
+    border: none;
+    background: transparent;
+  }
+
+  tbody tr + tr td {
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
+  }
+}
+
+.parsed-line-items__col-idx {
+  width: 1.25rem;
+}
+
+.parsed-line-items__col-qty {
+  width: 2.5rem;
+  white-space: nowrap;
+}
+
+.parsed-line-items__col-total {
+  width: 4rem;
+  white-space: nowrap;
+}
+
+.parsed-line-items__idx {
+  color: $grey-7;
+  font-size: 0.7rem;
+}
+
+.parsed-line-items__title {
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.2;
+  word-break: break-word;
+}
+
+.parsed-line-items__qty,
+.parsed-line-items__price {
+  font-size: 0.75rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.parsed-line-items__price {
+  font-weight: 500;
+}
+
+.parsed-line-items__meta {
+  font-size: 0.65rem;
+  line-height: 1.2;
+  margin-top: 1px;
+  word-break: break-word;
 }
 
 .config-dialog {

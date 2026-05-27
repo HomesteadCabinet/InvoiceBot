@@ -2,7 +2,7 @@
 
 import re
 
-from .schema import make_line_item, to_float
+from .schema import make_line_item, normalize_quantity, to_float
 
 ITEM_CODE_RE = re.compile(r"^[A-Z]{2,}-\d+$", re.IGNORECASE)
 QTY_UM_LINE_RE = re.compile(r"^\d+\s+\w+$")
@@ -54,6 +54,7 @@ def _parse_stacked_qty_um_block(block, unit_map):
     repeated UM, unit price (4 decimal places).
     """
     qty, unit = block[0].split(maxsplit=1)
+    qty = normalize_quantity(qty)
     qty_f = to_float(qty)
     item_id = ""
     description_lines = []

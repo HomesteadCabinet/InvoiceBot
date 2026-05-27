@@ -2,6 +2,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from .utils import get_gmail_service
 from .google_oauth import (
     GoogleOAuthNotConfiguredError,
@@ -11,7 +12,19 @@ from .google_oauth import (
     get_authorization_url,
     get_connection_status,
 )
-from .models import Contact, Invoice, InventoryItem, ItemType, Job, LineItem, ProcessedEmail, Vendor, VendorEmail
+from .models import (
+    Contact,
+    EmailMessageCache,
+    Invoice,
+    InventoryItem,
+    ItemType,
+    Job,
+    LineItem,
+    ProcessedEmail,
+    Vendor,
+    VendorEmail,
+    exclude_ignored_vendor_relations,
+)
 from .serializers import (
     ContactSerializer,
     InvoiceAutomationSettingsSerializer,
@@ -24,17 +37,21 @@ from .serializers import (
 )
 from .services import (
     attachment_info_for_message,
+    attachment_info_from_cache,
     parsed_envelope_for_process_result,
     persist_parsed_invoices,
     export_invoices_workbook,
     get_automation_settings,
     process_gmail_message,
     process_pending_gmail_invoices,
+    reset_invoice_data,
+    sync_invoice_receipt_status,
     update_automation_settings,
 )
 from django.conf import settings
 from django.http import HttpResponseRedirect, HttpResponse
 from django.db import models
+from django.utils import timezone
 import os
 from datetime import datetime
 import logging
@@ -227,55 +244,127 @@ def _invoice_payload_from_result(result, email_id=None):
     invoice = dict(invoices[0]) if invoices else {}
     attachment = result.get('attachment')
     if not attachment and email_id:
-        attachment = attachment_info_for_message(email_id)
+        cache = EmailMessageCache.objects.filter(email_id=email_id).first()
+        attachment = attachment_info_from_cache(cache) or attachment_info_for_message(email_id)
     if attachment:
         invoice['attachments'] = [attachment]
     return invoice
 
 
-def _serialize_list_email(service, message_id, processed=None):
-    email = service.users().messages().get(userId='me', id=message_id).execute()
-    attachment_count = 0
-    if 'payload' in email and 'parts' in email['payload']:
-        attachment_count = sum(
-            1 for part in email['payload']['parts'] if part.get('filename')
-        )
+def _header_map(headers):
+    return {
+        str(header.get('name') or '').lower(): header.get('value') or ''
+        for header in headers or []
+    }
 
-    headers = email['payload'].get('headers', [])
-    from_header = next(
-        (header['value'] for header in headers if header['name'].lower() == 'from'),
-        None,
-    )
-    date_header = next(
-        (header['value'] for header in headers if header['name'].lower() == 'date'),
-        None,
-    )
 
+def _count_attachment_parts(part):
+    count = 1 if part.get('filename') else 0
+    for child in part.get('parts') or []:
+        count += _count_attachment_parts(child)
+    return count
+
+
+def _vendor_from_cached_sender(from_header):
     sender_email = _extract_sender_email(from_header)
-    vendor_name = None
-    inferred_vendor_id = None
-    if sender_email:
-        vendor_name, inferred_vendor_id = _sync_vendor_for_sender(from_header, sender_email)
+    if not sender_email:
+        return None, None
+    vendor_email = VendorEmail.objects.select_related('vendor').filter(email=sender_email).first()
+    if vendor_email:
+        return vendor_email.vendor.name, vendor_email.vendor_id
+    return _vendor_name_from_sender(from_header, sender_email), None
 
-    if processed is None:
-        processed = (
-            ProcessedEmail.objects.filter(email_id=message_id).select_related('vendor').first()
-        )
-    vendor_id = processed.vendor_id if processed and processed.vendor_id else inferred_vendor_id
-    if processed and processed.vendor:
+
+def _vendor_is_ignored(vendor_id):
+    if not vendor_id:
+        return False
+    return Vendor.objects.filter(pk=vendor_id, ignore=True).exists()
+
+
+def _email_from_ignored_vendor(cache, processed):
+    """True when this Gmail message belongs to an ignored vendor."""
+    if processed and processed.vendor_id:
+        return bool(getattr(processed.vendor, 'ignore', False))
+    if cache and cache.vendor_id:
+        return bool(getattr(cache.vendor, 'ignore', False))
+    from_header = cache.from_header if cache else ''
+    _, vendor_id = _vendor_from_cached_sender(from_header)
+    return _vendor_is_ignored(vendor_id)
+
+
+def _fetch_gmail_metadata(service, message_id):
+    return service.users().messages().get(
+        userId='me',
+        id=message_id,
+        format='metadata',
+        metadataHeaders=['From', 'Date', 'Subject'],
+    ).execute()
+
+
+def _cache_email_metadata(message_id, gmail_message):
+    payload = gmail_message.get('payload') or {}
+    headers = payload.get('headers') or []
+    headers_by_name = _header_map(headers)
+    from_header = headers_by_name.get('from', '')
+    vendor_name, vendor_id = _vendor_from_cached_sender(from_header)
+    cache, _created = EmailMessageCache.objects.update_or_create(
+        email_id=message_id,
+        defaults={
+            'thread_id': gmail_message.get('threadId') or '',
+            'snippet': gmail_message.get('snippet') or '',
+            'from_header': from_header,
+            'subject': headers_by_name.get('subject', ''),
+            'date_header': headers_by_name.get('date', ''),
+            'attachment_count': _count_attachment_parts(payload),
+            'vendor_id': vendor_id,
+            'raw_headers': headers_by_name,
+            'last_seen_at': timezone.now(),
+        },
+    )
+    if vendor_name and not cache.vendor_id:
+        cache._inferred_vendor_name = vendor_name
+    return cache
+
+
+def _email_cache_to_item(cache, processed=None):
+    vendor_name = cache.vendor.name if cache.vendor_id else getattr(cache, '_inferred_vendor_name', '')
+    vendor_id = cache.vendor_id
+    if not vendor_name:
+        vendor_name, inferred_vendor_id = _vendor_from_cached_sender(cache.from_header)
+        vendor_id = vendor_id or inferred_vendor_id
+    if processed and processed.vendor_id:
         vendor_name = processed.vendor.name
+        vendor_id = processed.vendor_id
+    attachment = attachment_info_from_cache(cache)
+
+    vendor_ignored = False
+    if cache.vendor_id:
+        vendor_ignored = bool(getattr(cache.vendor, 'ignore', False))
+    elif vendor_id:
+        vendor_ignored = _vendor_is_ignored(vendor_id)
 
     return {
-        'id': message_id,
-        'snippet': email.get('snippet', ''),
-        'attachment_count': attachment_count,
-        'from': from_header,
-        'date': date_header,
+        'id': cache.email_id,
+        'snippet': cache.snippet,
+        'attachment_count': cache.attachment_count,
+        'attachment': attachment,
+        'attachments': [attachment] if attachment else [],
+        'from': cache.from_header,
+        'date': cache.date_header,
         'message_data': processed.data if processed else None,
         'status': _normalized_email_status(processed),
         'vendor_name': vendor_name,
         'vendor_id': vendor_id,
+        'vendor_ignored': vendor_ignored,
     }
+
+
+def _serialize_list_email(service, message_id, processed=None, cache=None):
+    if cache is None:
+        cache = EmailMessageCache.objects.select_related('vendor').filter(email_id=message_id).first()
+    if cache is None:
+        cache = _cache_email_metadata(message_id, _fetch_gmail_metadata(service, message_id))
+    return _email_cache_to_item(cache, processed=processed)
 
 
 @api_view(['GET'])
@@ -292,7 +381,7 @@ def list_invoice_emails(request):
     page_size = max(1, min(page_size, MAX_EMAIL_PAGE_SIZE))
 
     status_filter = (request.GET.get('status') or '').strip().lower() or None
-    if status_filter and status_filter not in {'pending', 'processed', 'error'}:
+    if status_filter and status_filter not in {'pending', 'processed', 'error', 'incorrect_parsing'}:
         return Response({'error': f'Invalid status: {status_filter}'}, status=400)
 
     vendor_id = (request.GET.get('vendorId') or '').strip() or None
@@ -319,15 +408,30 @@ def list_invoice_emails(request):
         messages = results.get('messages', [])
         next_page_token = results.get('nextPageToken')
         gmail_fetch_token = next_page_token
+        message_ids = [msg['id'] for msg in messages]
+        processed_map = {
+            processed.email_id: processed
+            for processed in ProcessedEmail.objects.filter(email_id__in=message_ids).select_related('vendor')
+        }
+        cache_map = EmailMessageCache.objects.filter(email_id__in=message_ids).select_related('vendor').in_bulk(
+            field_name='email_id'
+        )
 
         for msg in messages:
-            processed = None
+            processed = processed_map.get(msg['id'])
+            cache = cache_map.get(msg['id'])
+            if _email_from_ignored_vendor(cache, processed):
+                continue
             if status_filter:
-                processed = ProcessedEmail.objects.filter(email_id=msg['id']).first()
                 if not _email_matches_status(processed, status_filter):
                     continue
 
-            item = _serialize_list_email(service, msg['id'], processed=processed)
+            item = _serialize_list_email(
+                service,
+                msg['id'],
+                processed=processed,
+                cache=cache,
+            )
             if search and not _email_matches_search(item, search):
                 continue
             if vendor_id and not _email_matches_vendor_id(item.get('vendor_id'), vendor_id):
@@ -360,11 +464,16 @@ def process_invoice_email(request):
         return _google_connection_error_response(exc)
     try:
         result = process_gmail_message(service, email_id)
+        if result.get('status') == 'skipped' and result.get('reason') == 'vendor ignored':
+            return Response({
+                'status': 'skipped',
+                'errors': ['This vendor is marked as ignored.'],
+            })
         if result.get('status') == 'skipped':
             processed = ProcessedEmail.objects.filter(email_id=email_id).first()
             if processed:
                 result = {
-                    'status': 'processed',
+                    'status': processed.status,
                     'parsed': processed.data or {},
                     'processed_email': processed,
                     'attachment': attachment_info_for_message(email_id),
@@ -390,11 +499,66 @@ def process_invoice_email(request):
             'vendor': VendorSerializer(vendor).data if vendor else None,
             'vendor_name': vendor.name if vendor else parsed.get('vendor_name'),
             'vendor_id': vendor.id if vendor else None,
-            'errors': [] if result.get('status') == 'processed' else [result.get('reason', 'Processing failed')],
+            'errors': [] if result.get('status') in ('processed', 'incorrect_parsing') else [
+                result.get('reason', 'Processing failed')
+            ],
         })
     except Exception as exc:
         logger.exception('Failed to process invoice email %s', email_id)
         return Response({'status': 'error', 'errors': [str(exc)]}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def flag_incorrect_parsing(request):
+    email_id = (request.data.get('email_id') or '').strip()
+    if not email_id:
+        return Response({'error': 'email_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    cache = EmailMessageCache.objects.filter(email_id=email_id).select_related('vendor').first()
+    existing = ProcessedEmail.objects.filter(email_id=email_id).select_related('vendor').first()
+
+    vendor = None
+    if existing and existing.vendor_id:
+        vendor = existing.vendor
+    elif cache and cache.vendor_id:
+        vendor = cache.vendor
+    elif cache:
+        _, vendor_id = _vendor_from_cached_sender(cache.from_header)
+        if vendor_id:
+            vendor = Vendor.objects.filter(pk=vendor_id).first()
+
+    data = existing.data if existing and isinstance(existing.data, dict) else {}
+    data = {**data, 'flagged_incorrect_parsing': True}
+
+    processed_email, _ = ProcessedEmail.objects.update_or_create(
+        email_id=email_id,
+        defaults={
+            'status': 'incorrect_parsing',
+            'processed': timezone.now(),
+            'data': data,
+            'vendor': vendor,
+            'invoice': existing.invoice if existing else None,
+        },
+    )
+
+    return Response({
+        'email_id': email_id,
+        'status': processed_email.status,
+    })
+
+
+@api_view(['POST'])
+def reset_invoice_data_view(request):
+    try:
+        remove_all = request.data.get('remove_all') in (True, 'true', '1', 1, 'yes', 'on')
+        result = reset_invoice_data(remove_all=remove_all)
+        return Response({
+            'success': True,
+            **result,
+        })
+    except Exception as exc:
+        logger.exception('Failed to reset invoice data')
+        return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
@@ -616,9 +780,23 @@ def export_invoices_xlsx(request):
 class InvoiceViewSet(viewsets.ModelViewSet):
     queryset = Invoice.objects.select_related('vendor', 'contact').prefetch_related('line_items').all()
     serializer_class = InvoiceSerializer
+    ordering_fields = [
+        'invoice_number',
+        'vendor__name',
+        'contact__name',
+        'invoice_date',
+        'received_at',
+        'status',
+        'invoice_total',
+        'line_item_count_sort',
+        'processed_at',
+        'created_at',
+    ]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = exclude_ignored_vendor_relations(
+            super().get_queryset().annotate(line_item_count_sort=models.Count('line_items'))
+        )
         query = self.request.query_params.get('q')
         if query:
             queryset = queryset.filter(
@@ -628,12 +806,31 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 | models.Q(vendor__name__icontains=query)
                 | models.Q(contact__name__icontains=query)
             )
+        vendor_id = self.request.query_params.get('vendorId') or self.request.query_params.get('vendor_id')
+        if vendor_id:
+            queryset = queryset.filter(vendor_id=vendor_id)
         return queryset.order_by('-received_at', '-processed_at', '-created_at')
 
 
 class InventoryItemViewSet(viewsets.ModelViewSet):
-    queryset = InventoryItem.objects.select_related('vendor', 'item_type').all()
+    queryset = InventoryItem.objects.select_related(
+        'vendor',
+        'item_type',
+        'item_type__parent',
+        'item_type__parent__parent',
+    ).all()
     serializer_class = InventoryItemSerializer
+    ordering_fields = [
+        'name',
+        'item_key',
+        'item_id',
+        'vendor__name',
+        'item_type__name',
+        'current_qty',
+        'last_invoiced_at',
+        'created_at',
+        'updated_at',
+    ]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -650,20 +847,34 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
 
 
 class ItemTypeViewSet(viewsets.ModelViewSet):
-    queryset = ItemType.objects.all()
+    queryset = ItemType.objects.select_related('parent').all()
     serializer_class = ItemTypeSerializer
+    ordering_fields = ['name', 'parent__name', 'description', 'color', 'icon']
+
+    def get_serializer_context(self):
+        return {
+            **super().get_serializer_context(),
+            'request': self.request,
+        }
 
     def get_queryset(self):
         queryset = super().get_queryset()
         query = self.request.query_params.get('q')
         if query:
-            queryset = queryset.filter(name__icontains=query)
-        return queryset.order_by('name')
+            queryset = queryset.filter(
+                models.Q(name__icontains=query)
+                | models.Q(parent__name__icontains=query)
+            )
+        roots_only = self.request.query_params.get('roots_only')
+        if roots_only in ('1', 'true', 'yes'):
+            queryset = queryset.filter(parent__isnull=True)
+        return queryset.order_by('parent__name', 'name')
 
 
 class ContactViewSet(viewsets.ModelViewSet):
     queryset = Contact.objects.select_related('vendor').all()
     serializer_class = ContactSerializer
+    ordering_fields = ['name', 'vendor__name', 'email', 'phone', 'title', 'is_primary']
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -681,6 +892,7 @@ class ContactViewSet(viewsets.ModelViewSet):
 class JobViewSet(viewsets.ModelViewSet):
     queryset = Job.objects.select_related('vendor').all()
     serializer_class = JobSerializer
+    ordering_fields = ['job_id', 'name', 'vendor__name', 'created_at', 'updated_at']
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -696,12 +908,18 @@ class JobViewSet(viewsets.ModelViewSet):
 
 class LineItemViewSet(viewsets.ModelViewSet):
     queryset = LineItem.objects.select_related(
-        'invoice', 'invoice__vendor', 'job', 'inventory_item', 'item_type'
+        'invoice',
+        'invoice__vendor',
+        'job',
+        'inventory_item',
+        'item_type',
+        'item_type__parent',
+        'item_type__parent__parent',
     ).all()
     serializer_class = LineItemSerializer
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = exclude_ignored_vendor_relations(super().get_queryset(), 'invoice__vendor')
         query = self.request.query_params.get('q')
         if query:
             queryset = queryset.filter(
@@ -713,7 +931,26 @@ class LineItemViewSet(viewsets.ModelViewSet):
                 | models.Q(job__name__icontains=query)
                 | models.Q(job__job_id__icontains=query)
             )
+        inventory_item_id = self.request.query_params.get('inventory_item') or self.request.query_params.get('inventory_item_id')
+        if inventory_item_id:
+            queryset = queryset.filter(inventory_item_id=inventory_item_id)
         return queryset.order_by('-created_at')
+
+    def perform_create(self, serializer):
+        line_item = serializer.save()
+        if line_item.invoice_id:
+            sync_invoice_receipt_status(line_item.invoice)
+
+    def perform_update(self, serializer):
+        line_item = serializer.save()
+        if line_item.invoice_id:
+            sync_invoice_receipt_status(line_item.invoice)
+
+    def perform_destroy(self, instance):
+        invoice = instance.invoice if instance.invoice_id else None
+        instance.delete()
+        if invoice:
+            sync_invoice_receipt_status(invoice)
 
 
 class VendorViewSet(viewsets.ModelViewSet):
@@ -722,18 +959,22 @@ class VendorViewSet(viewsets.ModelViewSet):
     """
     queryset = Vendor.objects.all()
     serializer_class = VendorSerializer
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
 
-    def update(self, request, *args, **kwargs):
-        """
-        Update a vendor.
-        """
-        return super().update(request, *args, **kwargs)
+    def get_serializer_context(self):
+        return {
+            **super().get_serializer_context(),
+            'request': self.request,
+        }
 
     def get_queryset(self):
         """
-        Optionally filter by name
+        Optionally filter by name or active (non-ignored) vendors.
         """
         queryset = Vendor.objects.all()
+        active_only = self.request.query_params.get('active_only')
+        if active_only in ('1', 'true', 'yes'):
+            queryset = queryset.filter(ignore=False)
         query = self.request.query_params.get('q') or self.request.query_params.get('name')
         if query:
             queryset = queryset.filter(name__icontains=query)

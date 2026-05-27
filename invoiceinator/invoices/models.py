@@ -1,10 +1,12 @@
 from django.db import models
 from django.core.validators import MinValueValidator
+from django.db.models import Q
 
 STATUS_CHOICES = [
     ('pending', 'Pending'),
     ('processed', 'Processed'),
     ('error', 'Error'),
+    ('incorrect_parsing', 'Incorrect parsing'),
 ]
 
 INVOICE_TYPE_CHOICES = [
@@ -14,26 +16,73 @@ INVOICE_TYPE_CHOICES = [
 INVOICE_STATUS_CHOICES = [
     ('pending', 'Pending'),
     ('processed', 'Processed'),
+    ('partially_received', 'Partially Received'),
+    ('received', 'Received'),
     ('error', 'Error'),
 ]
 
+
 class Vendor(models.Model):
+    ignore = models.BooleanField(default=False)
     name = models.CharField(max_length=255)
+    logo = models.ImageField(upload_to='vendor_logos/', null=True, blank=True)
+    address = models.TextField(blank=True, default='')
+    city = models.CharField(max_length=255, blank=True, default='')
+    state = models.CharField(max_length=255, blank=True, default='')
+    zip_code = models.CharField(max_length=255, blank=True, default='')
+    country = models.CharField(max_length=255, blank=True, default='')
+    phone = models.CharField(max_length=255, blank=True, default='')
+    email = models.EmailField(blank=True, default='')
+    website = models.URLField(blank=True, default='')
     invoice_type = models.CharField(max_length=255, choices=INVOICE_TYPE_CHOICES)
-    spreadsheet_column_mapping = models.JSONField(null=True, blank=True, help_text="Column mapping for spreadsheet: {'invoice_number': 'A', 'date': 'B', 'total_amount': 'C'}")
     parser = models.CharField(max_length=255, null=True, blank=True, help_text="Parser method to use for extracting invoice data")
 
     def __str__(self):
         return self.name
 
 
+def exclude_ignored_vendor_relations(queryset, vendor_lookup='vendor'):
+    """Exclude rows linked to vendors with ``ignore=True``."""
+    return queryset.exclude(**{f'{vendor_lookup}__ignore': True})
+
+
 class ItemType(models.Model):
-    name = models.CharField(max_length=255, unique=True)
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='children',
+    )
+    name = models.CharField(max_length=255)
     description = models.TextField(blank=True, default='')
     color = models.CharField(max_length=32, blank=True, default='')
+    icon = models.CharField(max_length=64, blank=True, default='')
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['parent', 'name'],
+                name='unique_itemtype_parent_name',
+            ),
+        ]
+        ordering = ['name']
 
     def __str__(self):
-        return self.name
+        return self.get_full_path()
+
+    def get_full_path(self):
+        names = []
+        node = self
+        seen_ids = set()
+        while node is not None:
+            if node.pk and node.pk in seen_ids:
+                break
+            if node.pk:
+                seen_ids.add(node.pk)
+            names.append(node.name)
+            node = node.parent if node.parent_id else None
+        return ' › '.join(reversed(names))
 
 
 class Job(models.Model):
@@ -78,7 +127,13 @@ class Contact(models.Model):
     notes = models.TextField(blank=True, default='')
 
     class Meta:
-        unique_together = ['vendor', 'email']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['vendor', 'email'],
+                condition=~Q(email=''),
+                name='unique_vendor_contact_email_nonblank',
+            ),
+        ]
 
     def __str__(self):
         if self.vendor:
@@ -189,6 +244,8 @@ class LineItem(models.Model):
     width = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
     length = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
     height = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    received = models.BooleanField(default=False)
+    notes = models.TextField(blank=True, default='')
     raw_data = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -204,6 +261,30 @@ class ProcessedEmail(models.Model):
     data = models.JSONField(default=dict, help_text="Data extracted from the email")
     vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE, null=True, blank=True)
     invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True)
+
+    def __str__(self):
+        return self.email_id
+
+
+class EmailMessageCache(models.Model):
+    email_id = models.CharField(max_length=255, unique=True)
+    thread_id = models.CharField(max_length=255, blank=True, default='')
+    snippet = models.TextField(blank=True, default='')
+    from_header = models.CharField(max_length=512, blank=True, default='')
+    subject = models.CharField(max_length=512, blank=True, default='')
+    date_header = models.CharField(max_length=255, blank=True, default='')
+    attachment_count = models.PositiveIntegerField(default=0)
+    attachment_filename = models.CharField(max_length=512, blank=True, default='')
+    attachment_original_filename = models.CharField(max_length=512, blank=True, default='')
+    attachment_mime_type = models.CharField(max_length=255, blank=True, default='')
+    vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True)
+    raw_headers = models.JSONField(default=dict, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-last_seen_at', '-updated_at']
 
     def __str__(self):
         return self.email_id
